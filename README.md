@@ -17,7 +17,7 @@ One click, and the script:
 - **measures the sound of every camera** and keeps the cleanest one audible, muting duplicates;
 - writes a readable report of what it did and what you should check.
 
-Your source files are never changed. Each run creates a **new project**, so your current project stays as it is.
+Your source files are never changed. Each run saves your current project, then creates a **new project**, so your existing work stays as it is.
 
 ## Requirements
 
@@ -119,6 +119,16 @@ The report lists the measurements and the reason for the choice under **AUDIO**.
 ## Adapting it
 
 The scripts are plain Python. To make them fit your own setup (another camera, another resolution, extra tracks), give the script to an AI assistant such as Claude or ChatGPT, describe what you want changed, and test the result on a copy of your footage first.
+
+## How this was built and tested
+
+I'm a video creator, not a programmer: Claude (Anthropic's AI assistant) wrote this code, and I test it on my own footage. To make up for that, every release goes through the same checks:
+
+- **Real-world test** in DaVinci Resolve Studio 21.1 on macOS, with iPhone and Sony footage.
+- **Automated tests** (`tests/`) for the parts that don't need Resolve: frame rate choice, orientation, folder scanning, Sony metadata and sound sync. The sync test generates clips with a camera clock that is 37 seconds off and checks that the script places them within one frame.
+- **Code and safety review**, plus automatic code checks. The script never changes, moves or deletes your footage, runs FFmpeg without a shell, makes no internet connections, and only cleans up its own sound-analysis cache.
+
+Details are in [QUALITY.md](QUALITY.md). Still, it's free software provided as is, without warranty (see the license). **Back up your project before your first run**, and check the report the script writes.
 
 ## Help and feedback
 

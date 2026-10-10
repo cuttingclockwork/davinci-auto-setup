@@ -10,3 +10,4 @@ First public version.
 - Measures the sound of every camera and keeps the cleanest one audible.
 - Warns about mixed frame rates and centre-cropped landscape clips.
 - macOS and Windows.
+- Automated test suite (`tests/`) and a quality report ([QUALITY.md](QUALITY.md)).
