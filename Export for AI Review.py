@@ -152,13 +152,16 @@ def safe_name(text):
     return name[:120] or 'Timeline'
 
 
-def unique_path(folder, stem, suffix):
-    path = Path(folder) / (stem + suffix)
-    n = 2
-    while path.exists():
-        path = Path(folder) / ('%s %d%s' % (stem, n, suffix))
-        n += 1
-    return path
+def claim_path(folder, stem, suffix):
+    """Create an empty file with a free name, so nothing can take it before the move."""
+    n = 1
+    while True:
+        path = Path(folder) / (stem + suffix if n == 1 else '%s %d%s' % (stem, n, suffix))
+        try:
+            with open(path, 'x'):
+                return path
+        except FileExistsError:
+            n += 1
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +180,10 @@ def snapshot(project):
     try:
         job = find_job(project, job_id)
     finally:
-        project.DeleteRenderJob(job_id)
+        deleted = project.DeleteRenderJob(job_id)
+    if not deleted or find_job(project, job_id):
+        raise Stop('Resolve could not remove a temporary render job (%s). Delete it from the render queue on the '
+                   'Deliver page.' % job_id)
     if not job or any(job.get(k) is None for k in REQUIRED_JOB_KEYS):
         raise Stop('Resolve did not report enough Deliver settings to restore them afterwards. Nothing was changed.')
     fc = dict(project.GetCurrentRenderFormatAndCodec() or {})
@@ -188,8 +194,13 @@ def snapshot(project):
     if not fc.get('format') or not fc.get('codec'):
         raise Stop('Resolve does not report which format and codec the Deliver page uses, so they could not be '
                    'restored afterwards. Choose a format and codec on the Deliver page, then try again. Nothing was changed.')
+    timeline = project.GetCurrentTimeline()
+    marks = (timeline.GetMarkInOut() if timeline else None) or {}
     return {'job': {k: v for k, v in job.items() if k not in IGNORED_JOB_KEYS},
-            'format_codec': fc, 'render_mode': project.GetCurrentRenderMode()}
+            'format_codec': fc, 'render_mode': project.GetCurrentRenderMode(),
+            # Without In/Out marks the render range is the whole timeline and must
+            # keep following it; MarkIn/MarkOut alone can't tell this apart.
+            'whole_timeline': not (marks.get('video') or marks.get('audio'))}
 
 
 def restore(project, snap, preset, size_changed=False):
@@ -197,16 +208,19 @@ def restore(project, snap, preset, size_changed=False):
     job, fc = snap['job'], snap['format_codec']
     problems = []
     if not project.LoadRenderPreset(preset):
-        problems.append('backup preset could not be loaded')
+        problems.append('backup preset')
     if not project.SetCurrentRenderMode(snap['render_mode']):
         problems.append('render mode')
     if not project.SetCurrentRenderFormatAndCodec(fc['format'], fc['codec']):
         problems.append('format/codec')
     # The file name is deliberately never set: Resolve cannot restore the
     # "Timeline Name" token once a script has set a fixed name.
-    if not project.SetRenderSettings({'TargetDir': job['TargetDir'], 'ExportVideo': job['IsExportVideo'],
-                                      'ExportAudio': job['IsExportAudio'], 'SelectAllFrames': False,
-                                      'MarkIn': job['MarkIn'], 'MarkOut': job['MarkOut']}):
+    settings = {'TargetDir': job['TargetDir'], 'ExportVideo': job['IsExportVideo'], 'ExportAudio': job['IsExportAudio']}
+    if snap.get('whole_timeline'):
+        settings['SelectAllFrames'] = True
+    else:
+        settings.update(SelectAllFrames=False, MarkIn=job['MarkIn'], MarkOut=job['MarkOut'])
+    if not project.SetRenderSettings(settings):
         problems.append('render settings')
     if size_changed:
         # Only a size the user had set differently from the timeline is ever
@@ -223,7 +237,27 @@ def restore(project, snap, preset, size_changed=False):
         problems.append('format/codec')
     if after['render_mode'] != snap['render_mode']:
         problems.append('render mode')
+    if after['whole_timeline'] != snap.get('whole_timeline'):
+        problems.append('In/Out marks')
     return sorted(set(problems))
+
+
+def describe(problems, snap):
+    """Each setting that didn't come back, with the value it should have."""
+    job, fc = snap['job'], snap['format_codec']
+    parts = []
+    for name in problems:
+        if name in job:
+            parts.append('%s (should be %s)' % (name, job[name]))
+        elif name == 'format/codec':
+            parts.append('format/codec (should be %s / %s)' % (fc['format'], job.get('VideoCodec') or fc['codec']))
+        elif name == 'render mode':
+            parts.append('render mode (should be %s)' % ('Single clip' if snap['render_mode'] == 1 else 'Individual clips'))
+        elif name == 'In/Out marks':
+            parts.append('In/Out marks (should be %s)' % ('none' if snap.get('whole_timeline') else 'as before'))
+        else:
+            parts.append(name)
+    return '; '.join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +276,16 @@ def wait_for_render(project, job_id):
         if not project.IsRenderingInProgress() and state not in ('Rendering', 'Ready', 'Queued', ''):
             return state, status.get('Error')
     return 'Timed out', None
+
+
+def stop_render(project, seconds=30):
+    """Stop the export after a time-out. Resolve can only stop all rendering;
+    the script checked that nothing else was rendering when it started."""
+    project.StopRendering()
+    deadline = time.time() + seconds
+    while project.IsRenderingInProgress() and time.time() < deadline:
+        time.sleep(1)
+    return not project.IsRenderingInProgress()
 
 
 def export(app, output_folder=None):
@@ -269,11 +313,16 @@ def export(app, output_folder=None):
     # (for example "Timeline Resolution"), the size is left alone, because a
     # script cannot check whether that choice would survive being set.
     size_changed = min(size) > 0 and (snap['job'].get('FormatWidth'), snap['job'].get('FormatHeight')) != size
+    try:
+        work = Path(tempfile.mkdtemp(prefix='ai-review-'))
+    except OSError as error:
+        raise Stop('No temporary folder could be created (%s). Nothing was changed.' % error) from error
     preset = '__ai_review_backup_%s' % datetime.now().strftime('%Y%m%d_%H%M%S')
     if not project.SaveAsNewRenderPreset(preset):
+        os.rmdir(work)
         raise Stop('Resolve could not save a backup of the Deliver settings. Nothing was changed.')
-    work = Path(tempfile.mkdtemp(prefix='ai-review-'))
-    job_id, problems, warnings, result, failure = None, [], [], None, None
+
+    job_id, output_name, warnings, result, failure, still_rendering = None, None, [], None, None, False
     try:
         if snap['format_codec']['format'] != 'mp4':
             # ProRes and other large formats become H.264; an MP4 setting is kept as it is.
@@ -288,6 +337,7 @@ def export(app, output_folder=None):
         if not job_id:
             raise Stop('Resolve refused the export job.')
         job = find_job(project, job_id) or {}
+        output_name = job.get('OutputFilename')
         if Path(job.get('TargetDir') or '').resolve() != work.resolve() or job.get('MarkIn') != first \
                 or job.get('MarkOut') != end - 1 or not str(job.get('OutputFilename', '')).lower().endswith('.mp4') \
                 or (size_changed and (job.get('FormatWidth'), job.get('FormatHeight')) != size):
@@ -295,42 +345,73 @@ def export(app, output_folder=None):
         # The job keeps its own settings, so the Deliver page goes back before rendering.
         problems = restore(project, snap, preset, size_changed)
         if problems:
-            raise Stop('Your Deliver settings could not be put back exactly (%s); nothing was rendered.'
-                       % ', '.join(problems))
+            raise Stop('Your Deliver settings could not be put back exactly, so nothing was rendered: %s.'
+                       % describe(problems, snap))
         if not project.StartRendering([job_id]):
             raise Stop('Resolve did not start the export.')
         state, error = wait_for_render(project, job_id)
+        if state == 'Timed out':
+            still_rendering = not stop_render(project)
+            raise Stop('The export took longer than %g minutes and was stopped. Raise MAX_RENDER_MINUTES in the '
+                       'script for long timelines.' % MAX_RENDER_MINUTES)
         if state != 'Complete':
             raise Stop('The export did not finish (%s%s).' % (state, ': %s' % error if error else ''))
         rendered = work / job['OutputFilename']
         if not rendered.is_file():
-            files = [p for p in work.iterdir() if p.suffix.lower() == '.mp4']
+            files = [f for f in work.iterdir() if f.suffix.lower() == '.mp4']
             rendered = files[0] if len(files) == 1 else rendered
         if not rendered.is_file():
             raise Stop('Resolve reported the export as complete, but the file is missing.')
-        result = unique_path(folder, safe_name(timeline.GetName()) + ' - AI review', '.mp4')
-        shutil.move(str(rendered), str(result))
+        target = claim_path(folder, safe_name(timeline.GetName()) + ' - AI review', '.mp4')
+        shutil.move(str(rendered), str(target))  # Replaces only the empty file claimed above.
+        result = target
     except Stop as stop:
         failure = str(stop)
     except Exception:
         failure = 'Unexpected error:\n' + traceback.format_exc()
     finally:
-        if job_id and find_job(project, job_id):
-            project.DeleteRenderJob(job_id)
-        # Starting a render may reload Deliver settings; check once more.
-        problems = restore(project, snap, preset, size_changed)
-        if problems:
-            warnings.append('Your Deliver settings could not be put back exactly: %s. The backup preset "%s" was '
-                            'kept; load it on the Deliver page to get your settings back.' % (', '.join(problems), preset))
-        else:
-            project.DeleteRenderPreset(preset)
-        try:
-            os.rmdir(work)  # Only succeeds when empty; never deletes anything else.
-        except OSError:
-            warnings.append('A temporary folder was left behind: %s' % work)
+        warnings += cleanup(project, snap, preset, size_changed, job_id, work, still_rendering, output_name)
     if failure:
         raise Stop('\n\n'.join([failure] + warnings))
     return result, warnings
+
+
+def cleanup(project, snap, preset, size_changed, job_id, work, still_rendering, output_name=None):
+    """Each step runs on its own, so one failure never skips the others or hides the backup."""
+    notes = []
+    if still_rendering:
+        return ['Resolve is still rendering the export (job %s) into %s. Stop it on the Deliver page, then load the '
+                'backup preset "%s" and check your settings; the script could not restore them while rendering.'
+                % (job_id, work, preset)]
+    try:
+        if job_id and find_job(project, job_id) and (not project.DeleteRenderJob(job_id) or find_job(project, job_id)):
+            notes.append('The export job %s is still in the render queue; delete it on the Deliver page.' % job_id)
+    except Exception as error:
+        notes.append('The export job %s could not be checked (%s); look in the render queue.' % (job_id, error))
+    try:
+        # Starting a render may reload Deliver settings; check once more.
+        problems = restore(project, snap, preset, size_changed)
+    except Exception as error:
+        problems = ['restore failed: %s' % error]
+    if problems:
+        notes.append('Your Deliver settings could not be put back exactly: %s. The backup preset "%s" was kept. '
+                     'Load it on the Deliver page, then set the values listed here by hand; a preset does not '
+                     'restore all of them.' % (describe(problems, snap), preset))
+    else:
+        try:
+            if not project.DeleteRenderPreset(preset):
+                notes.append('The backup preset "%s" could not be removed; you can delete it on the Deliver page.' % preset)
+        except Exception as error:
+            notes.append('The backup preset "%s" could not be removed (%s).' % (preset, error))
+    try:
+        # A stopped or failed export can leave its own partial file; remove only that one.
+        partial = work / output_name if output_name and Path(output_name).name == output_name else None
+        if partial and partial.is_file() and not partial.is_symlink():
+            partial.unlink()
+        os.rmdir(work)  # Only succeeds when empty; never deletes anything else.
+    except OSError:
+        notes.append('A temporary folder was left behind: %s' % work)
+    return notes
 
 
 def main():

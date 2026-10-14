@@ -24,11 +24,26 @@ This file records the checks behind each release. The code is written by Claude 
 - The export uses the timeline's resolution. When Deliver already matches it (for example "Timeline Resolution"), the size is not touched: whether that choice survives an explicit size cannot be checked through the API, and a lost choice would export a 16:9 timeline at 9:16 in projects with both. When Deliver differs (a fixed size), the timeline size is set for the export and the fixed size is set back explicitly, because a backup preset does not restore the output size. A 720p option was considered and dropped (Dion, 14 October): an extra FFmpeg step would lengthen the workflow.
 - The preset menu label becomes "Custom Export" after any scripted change (confirmed on screen by Dion); render jobs always report `PresetName: 'Custom'`, so the original preset can't be detected. Documented in the README.
 
+**Second opinion (ChatGPT, 14 October 2026)**, eight findings:
+
+| Finding | Response |
+|---|---|
+| "Entire Timeline" came back as a fixed In/Out range (same frames, but no longer following a longer timeline) | Confirmed in Resolve: after an export, extending the timeline no longer extended the render range. Fixed: the snapshot records whether the timeline had In/Out marks; without marks the range is restored with `SelectAllFrames`. Verified live: the range follows a longer timeline again, and existing marks come back unchanged. |
+| The original preset selection is not restored | Not fixable: render jobs always report `PresetName: 'Custom'`, and any scripted change switches the label to "Custom Export". Documented in the README. |
+| A time-out started the cleanup while Resolve could still be rendering | Fixed: the script stops the render (`StopRendering`, only after checking at the start that nothing else was rendering) and waits until it has stopped; if it doesn't stop, it changes nothing more and reports the job, folder and backup preset. Verified live with a forced time-out. |
+| Failed deletions of jobs and presets were silently accepted | Fixed: every deletion is checked and anything left is reported with its name. |
+| An error during cleanup could skip the restore and hide the backup preset | Fixed: each cleanup step runs on its own and adds to the report. |
+| A file could appear under the chosen name just before the move | Fixed: the name is claimed by creating the file exclusively, then the export replaces only that empty file. |
+| A failing temporary folder left a backup preset behind | Fixed: the folder is created before the backup preset. |
+| The recovery message promised more than the preset can restore | Fixed: each setting that didn't come back is listed with the value it should have, and the message says to set those by hand. |
+
+A stopped or failed export can leave its own partial file in its temporary folder; the cleanup now removes that one file (only the name of its own render job) and the empty folder, nothing else.
+
 **Automatic code checks:** Ruff (F, E9, B, PLE, PLW): no findings. Bandit (medium and high): no findings.
 
-**Automated tests:** 15 new tests (35 in total, all passing): export range including single In or Out marks and bad marks, file names, never overwriting, and the Deliver restore against a stand-in that reproduces the audio reset, the empty codec and the unrecoverable file name token.
+**Automated tests:** 21 new tests (41 in total, all passing): export range including single In or Out marks and bad marks, file names, never overwriting, and the Deliver restore against a stand-in that reproduces the audio reset, the empty codec and the unrecoverable file name token.
 
-**Real-world test (Claude, through the Resolve MCP, on a disposable project):** passed for an MP4/H.265 preset with an empty reported codec (3.4 s for a 19.7 s 1080×1920 timeline), ProRes 422 HQ with 24-bit LPCM, an In/Out range (10–300) with `RANGE = 'marks'` (11.7 s file), and a fixed 720×1280 Deliver size on a 1080×1920 timeline (exported at 1080×1920, Deliver back on 720×1280). Every readable Deliver setting identical afterwards; marks unchanged; the file name token still followed a renamed timeline; no render jobs, backup presets or temporary folders left. Not yet tested: a run started by a user from Workspace › Scripts (including the folder dialog and the Finder window), Windows and the free version of Resolve.
+**Real-world test (Claude, through the Resolve MCP, on a disposable project):** passed for an MP4/H.265 preset with an empty reported codec (3.4 s for a 19.7 s 1080×1920 timeline), ProRes 422 HQ with 24-bit LPCM, an In/Out range (10–300) with `RANGE = 'marks'` (11.7 s file), a fixed 720×1280 Deliver size on a 1080×1920 timeline (exported at 1080×1920, Deliver back on 720×1280), "Entire Timeline" (the range follows a longer timeline afterwards), existing In/Out marks, and a forced time-out (render stopped, nothing left behind). Every readable Deliver setting identical afterwards; marks unchanged; the file name token still followed a renamed timeline; no render jobs, backup presets or temporary folders left. A run started by Dion from Workspace › Scripts produced the MP4 (1080×1920) in the folder he chose; he noticed the preset label, see above. Whether the Finder window opened was not reported. Not yet tested: Windows and the free version of Resolve.
 
 ## 1.0.0 — checks of 10 October 2026
 

@@ -69,6 +69,7 @@ What it does:
 - **Uses your own codec settings.** An MP4 stays as you set it (codec, bitrate). Any other format, such as ProRes, becomes MP4/H.264 for this export, because AI tools need a file they can upload.
 - **Always exports video with sound**, the whole timeline by default.
 - **Never overwrites a file.** If the name exists, it adds a number.
+- **Keeps your render range.** "Entire Timeline" stays Entire Timeline, In/Out marks stay where they were.
 - **Puts the Deliver page back** and checks every setting Resolve lets a script read: format and codec, audio, range, folder, file name. It never changes your file name setting, so a "Timeline Name" file name keeps following the timeline. If something can't be put back, it keeps a backup preset and tells you which one to load.
 
 | Setting | What it does |
