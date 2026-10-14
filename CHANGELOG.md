@@ -1,14 +1,14 @@
 # Changelog
 
-## 1.1.0 (unreleased)
+## 1.1.0 — 2026-10-14
 
 - **New script: Export for AI Review.** Exports the open timeline as an MP4 with sound for feedback from Gemini, ChatGPT or Claude, then puts the Deliver page back and checks it. Exports at the timeline's resolution; MP4 codec settings are kept; other formats such as ProRes become MP4/H.264 for this export. Whole timeline or In/Out range (`RANGE`), never overwrites a file, never changes your file name setting.
 - The timeline scripts are unchanged apart from the version number.
-- Tested on 14 October 2026 in DaVinci Resolve Studio 21.1.1 on macOS on a disposable project: an MP4/H.265 preset whose codec Resolve reports as empty, ProRes 422 HQ with 24-bit LPCM audio, an In/Out range, a fixed Deliver size different from the timeline, "Entire Timeline", and a forced time-out. Code reviewed by ChatGPT; seven of eight findings fixed (see QUALITY.md). Every readable Deliver setting was identical afterwards, the "Timeline Name" file name still followed the timeline, and no jobs, presets, marks or temporary folders were left behind. Not yet tested: Windows, the free version of Resolve, and starting it from the Workspace menu by a user.
+- Tested on 14 October 2026 in DaVinci Resolve Studio 21.1.1 on macOS on a disposable project: an MP4/H.265 preset whose codec Resolve reports as empty, ProRes 422 HQ with 24-bit LPCM audio, an In/Out range, a fixed Deliver size different from the timeline, "Entire Timeline", and a forced time-out. Code reviewed by ChatGPT; seven of eight findings fixed (see QUALITY.md). Every readable Deliver setting was identical afterwards, the "Timeline Name" file name still followed the timeline, and no jobs, presets, marks or temporary folders were left behind. Run from Workspace › Scripts by Cutting Clockwork on a real timeline. Not yet tested: Windows and the free version of Resolve.
 
-## 1.0.0 (unreleased)
+## 1.0.0 (not released separately; included in 1.1.0)
 
-First public version.
+First version.
 
 - One folder of footage becomes a synced, colour-managed timeline: 16:9 (YouTube Timeline) or 9:16 (Reels Timeline).
 - Works with any camera brand; colour profile per camera from metadata or the `CAMERA_PROFILES` setting.
