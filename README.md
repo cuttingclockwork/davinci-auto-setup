@@ -137,6 +137,7 @@ The report lists the measurements and the reason for the choice under **AUDIO**.
 - **Subtitles** are exported the way your Deliver page is set (burned in or not); the script doesn't change that.
 - **Settings Resolve doesn't let scripts read**, such as quality and hardware encoding, are restored through a backup preset but can't be checked one by one. In tests with an MP4/H.265 preset the export afterwards was identical to before.
 - **Individual clips** mode isn't supported; the script asks you to switch to Single clip.
+- **The preset menu shows "Custom Export" afterwards.** Resolve switches the label as soon as a script changes any Deliver setting, and scripts can't read or set the label. Your settings are the same as before; pick your preset again if you want to see its name.
 
 **Timeline scripts**
 

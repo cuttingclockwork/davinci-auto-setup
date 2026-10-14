@@ -21,6 +21,8 @@ This file records the checks behind each release. The code is written by Claude 
 - Switching to MP4 resets the audio to AAC 32-bit and a preset doesn't restore it, so audio fields are restored one by one.
 - Some presets make Resolve report an empty codec; the codec is then taken from a render job by name.
 - The Deliver page is restored before the render starts (the job keeps its own settings) and once more afterwards.
+- Resolution stays as it is. A backup preset does not restore the output size, and whether the "Timeline Resolution" choice survives an explicit size cannot be checked through the API; a lost choice would export a 16:9 timeline at 9:16 in projects with both. A 720p option was considered and dropped (Dion, 14 October): an extra FFmpeg step would lengthen the workflow.
+- The preset menu label becomes "Custom Export" after any scripted change (confirmed on screen by Dion); render jobs always report `PresetName: 'Custom'`, so the original preset can't be detected. Documented in the README.
 
 **Automatic code checks:** Ruff (F, E9, B, PLE, PLW): no findings. Bandit (medium and high): no findings.
 
