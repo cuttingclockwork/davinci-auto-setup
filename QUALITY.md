@@ -2,6 +2,32 @@
 
 This file records the checks behind each release. The code is written by Claude (Anthropic's AI assistant); Cutting Clockwork tests it on real footage.
 
+## 1.1.0 — Export for AI Review, checks of 14 October 2026
+
+**Safety rules**, verified by reading the full code:
+
+| Rule | Result |
+|---|---|
+| Source footage and projects are never changed | Passed. The script only reads the timeline and changes Deliver settings temporarily; it puts them back and checks them. |
+| Deleting only in the tool's own folder | Passed. It removes its own render job, its own backup preset (only after a verified restore) and its own empty temporary folder (`os.rmdir`, which refuses a folder with files in it). The MP4 is moved, never deleted. |
+| External programs without a shell | Passed. Only `open` / `explorer` to show the result, with an argument list. |
+| No internet connections | Passed. |
+| No keys, personal paths or e-mail addresses | Passed. |
+| Existing files are never overwritten | Passed. A number is added to the name. |
+
+**Design choices after tests in Resolve Studio 21.1.1** (see `github/BEVINDINGEN.md` in the project notes):
+- The file name setting (`CustomName`) is never set: once a script sets it, Resolve cannot bring back the "Timeline Name" token, and no check can see the difference. The script renders into its own empty folder instead and renames the file afterwards.
+- Resolution, frame rate and quality are not touched; an MP4 setting is used as it is. Only the range, the target folder, "export video/audio" and, for non-MP4 formats, the format and codec change.
+- Switching to MP4 resets the audio to AAC 32-bit and a preset doesn't restore it, so audio fields are restored one by one.
+- Some presets make Resolve report an empty codec; the codec is then taken from a render job by name.
+- The Deliver page is restored before the render starts (the job keeps its own settings) and once more afterwards.
+
+**Automatic code checks:** Ruff (F, E9, B, PLE, PLW): no findings. Bandit (medium and high): no findings.
+
+**Automated tests:** 14 new tests (34 in total, all passing): export range including single In or Out marks and bad marks, file names, never overwriting, and the Deliver restore against a stand-in that reproduces the audio reset, the empty codec and the unrecoverable file name token.
+
+**Real-world test (Claude, through the Resolve MCP, on a disposable project):** passed for an MP4/H.265 preset with an empty reported codec (3.4 s for a 19.7 s 1080×1920 timeline), ProRes 422 HQ with 24-bit LPCM, and an In/Out range (10–300) with `RANGE = 'marks'` (11.7 s file). Every readable Deliver setting identical afterwards; marks unchanged; the file name token still followed a renamed timeline; no render jobs, backup presets or temporary folders left. Not yet tested: a run started by a user from Workspace › Scripts (including the folder dialog and the Finder window), Windows and the free version of Resolve.
+
 ## 1.0.0 — checks of 10 October 2026
 
 **Safety rules**, verified by reading the full code:

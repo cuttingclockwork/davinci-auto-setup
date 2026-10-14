@@ -1,6 +1,6 @@
 # DaVinci Auto-Setup
 
-Two DaVinci Resolve scripts that turn one folder of footage into a ready-to-edit timeline:
+DaVinci Resolve scripts for the start and the end of an edit. Two of them turn one folder of footage into a ready-to-edit timeline:
 
 | Script | Timeline | Uses |
 |---|---|---|
@@ -19,13 +19,15 @@ One click, and the script:
 
 Your source files are never changed. Each run saves your current project, then creates a **new project**, so your existing work stays as it is.
 
+The third script, **Export for AI Review**, turns the timeline you are editing into an MP4 you can drop into Gemini, ChatGPT or Claude for feedback, without touching your Deliver settings. See [Export for AI Review](#export-for-ai-review).
+
 ## Requirements
 
 - **DaVinci Resolve 21.** Developed and tested on Resolve Studio 21.1 for macOS. The free version and Windows are supported in the code but have not been tested yet. Please open an issue if something breaks.
 - **Python 3.10 or newer**, installed system-wide. Resolve uses it to run scripts.
   - macOS: usually already installed. Otherwise use [python.org](https://www.python.org/downloads/).
   - Windows: install from [python.org](https://www.python.org/downloads/) and tick **"Add python.exe to PATH"**.
-- **FFmpeg** (`ffmpeg` and `ffprobe`), used to read metadata and analyse sound.
+- **FFmpeg** (`ffmpeg` and `ffprobe`), used by the two timeline scripts to read metadata and analyse sound. Export for AI Review doesn't need it.
   - macOS: `brew install ffmpeg`
   - Windows: `winget install Gyan.FFmpeg`
   - Restart Resolve after installing.
@@ -33,15 +35,15 @@ Your source files are never changed. Each run saves your current project, then c
 ## Installation
 
 1. Download the latest ZIP from [Releases](https://github.com/cuttingclockwork/davinci-auto-setup/releases/latest) and extract it.
-2. Copy `YouTube Timeline.py` and `Reels Timeline.py` into Resolve's script folder:
+2. Copy `YouTube Timeline.py`, `Reels Timeline.py` and `Export for AI Review.py` into Resolve's script folder:
 
    - **macOS:** `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/`
      In Finder, choose **Go › Go to Folder…** and paste this path.
    - **Windows:** `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`
      Paste this path into File Explorer's address bar.
-3. Restart Resolve. Both scripts now appear under **Workspace › Scripts**.
+3. Restart Resolve. The scripts now appear under **Workspace › Scripts**. Copy only the ones you want.
 
-To update, replace both files with the new version. Your settings live at the top of each script, so copy them over first.
+To update, replace the files with the new version. Your settings live at the top of each script, so copy them over first.
 
 ## Use
 
@@ -53,7 +55,30 @@ To update, replace both files with the new version. Your settings live at the to
 
 Reports are saved in `~/Library/Logs/Resolve Timeline Scripts/` (macOS) or `%LOCALAPPDATA%\Resolve Timeline Scripts\Logs\` (Windows).
 
-## Settings
+## Export for AI Review
+
+Want feedback on an edit from an AI model? It needs a video file. This script makes one from the timeline that is open, and puts your Deliver page back the way it was.
+
+1. Open the timeline in Resolve. Set the Deliver page to **Single clip** (the default).
+2. **Workspace › Scripts › Export for AI Review**.
+3. Choose a folder. When the export is done, the file is shown in Finder or File Explorer: `<timeline name> - AI review.mp4`.
+
+What it does:
+
+- **Uses your own Deliver settings.** An MP4 stays as you set it (codec, resolution, bitrate). Any other format, such as ProRes, becomes MP4/H.264 for this export, because AI tools need a file they can upload.
+- **Always exports video with sound**, the whole timeline by default.
+- **Never overwrites a file.** If the name exists, it adds a number.
+- **Puts the Deliver page back** and checks every setting Resolve lets a script read: format and codec, audio, range, folder, file name. It never changes your file name setting, so a "Timeline Name" file name keeps following the timeline. If something can't be put back, it keeps a backup preset and tells you which one to load.
+
+| Setting | What it does |
+|---|---|
+| `RANGE` | `'timeline'` (default) exports the whole timeline. `'marks'` exports only between the In and Out marks; a missing In or Out mark means the start or end of the timeline. |
+| `OUTPUT_FOLDER` | A fixed folder, e.g. `'/Users/me/Desktop'`. Empty = ask every time. |
+| `MAX_RENDER_MINUTES` | How long the script waits for the export before it gives up (default 30). |
+
+If the script stops, it opens a short note saying why and what to do. Notes are saved next to the timeline reports.
+
+## Settings (timeline scripts)
 
 Open the script in a text editor. All settings sit at the top, under `SETTINGS`. Change both scripts the same way: they are identical except for the `WORKFLOW` line.
 
@@ -106,6 +131,15 @@ The report lists the measurements and the reason for the choice under **AUDIO**.
 
 ## Known limitations
 
+**Export for AI Review**
+
+- **The file can be large.** It uses your own MP4 bitrate; a 30 Mb/s preset makes about 75 MB for 20 seconds. That uploads fine to Gemini and ChatGPT. Pick a lighter preset on the Deliver page first if you need a smaller file.
+- **Subtitles** are exported the way your Deliver page is set (burned in or not); the script doesn't change that.
+- **Settings Resolve doesn't let scripts read**, such as quality and hardware encoding, are restored through a backup preset but can't be checked one by one. In tests with an MP4/H.265 preset the export afterwards was identical to before.
+- **Individual clips** mode isn't supported; the script asks you to switch to Single clip.
+
+**Timeline scripts**
+
 - **Mixed frame rates judder.** Resolve plays a 30 fps clip on a 25 fps timeline by skipping frames. The report warns you. The fix is to record every camera at the same frame rate, or a multiple of it (25 + 50, or 30 + 60).
 - **Sync needs shared sound.** A camera without audio, or one that recorded something else (like a GoPro on the outside of a car), falls back to its own clock. The report says which clips aren't confirmed.
 - **Wrong camera clocks.** Clocks off by more than `CLOCK_TOLERANCE_HOURS` aren't matched.
@@ -125,7 +159,7 @@ The scripts are plain Python. To make them fit your own setup (another camera, a
 I'm a video creator, not a programmer: Claude (Anthropic's AI assistant) wrote this code, and I test it on my own footage. To make up for that, every release goes through the same checks:
 
 - **Real-world test** in DaVinci Resolve Studio 21.1 on macOS, with iPhone and Sony footage.
-- **Automated tests** (`tests/`) for the parts that don't need Resolve: frame rate choice, orientation, folder scanning, Sony metadata and sound sync. The sync test generates clips with a camera clock that is 37 seconds off and checks that the script places them within one frame.
+- **Automated tests** (`tests/`) for the parts that don't need Resolve: frame rate choice, orientation, folder scanning, Sony metadata and sound sync. The sync test generates clips with a camera clock that is 37 seconds off and checks that the script places them within one frame. For Export for AI Review: the export range, file names, and the Deliver restore against a stand-in that behaves like Resolve (audio reset when switching to MP4, a codec Resolve reports as empty, a file name a script can't restore).
 - **Code and safety review**, plus automatic code checks. The script never changes, moves or deletes your footage, runs FFmpeg without a shell, makes no internet connections, and only cleans up its own sound-analysis cache.
 
 Details are in [QUALITY.md](QUALITY.md). Still, it's free software provided as is, without warranty (see the license). **Back up your project before your first run**, and check the report the script writes.

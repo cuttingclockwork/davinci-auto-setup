@@ -26,7 +26,7 @@ import sys
 import traceback
 import xml.etree.ElementTree as ET
 
-VERSION = '1.0.0'  # https://github.com/cuttingclockwork/davinci-auto-setup
+VERSION = '1.1.0'  # https://github.com/cuttingclockwork/davinci-auto-setup
 
 # ---------------------------------------------------------------------------
 # SETTINGS: the only part most people need to change.

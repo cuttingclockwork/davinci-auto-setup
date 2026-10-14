@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0 (unreleased)
+
+- **New script: Export for AI Review.** Exports the open timeline as an MP4 with sound for feedback from Gemini, ChatGPT or Claude, then puts the Deliver page back and checks it. MP4 settings are kept; other formats such as ProRes become MP4/H.264 for this export. Whole timeline or In/Out range (`RANGE`), never overwrites a file, never changes your file name setting.
+- The timeline scripts are unchanged apart from the version number.
+- Tested on 14 October 2026 in DaVinci Resolve Studio 21.1.1 on macOS on a disposable project: an MP4/H.265 preset whose codec Resolve reports as empty, ProRes 422 HQ with 24-bit LPCM audio, and an In/Out range. Every readable Deliver setting was identical afterwards, the "Timeline Name" file name still followed the timeline, and no jobs, presets, marks or temporary folders were left behind. Not yet tested: Windows, the free version of Resolve, and starting it from the Workspace menu by a user.
+
 ## 1.0.0 (unreleased)
 
 First public version.
