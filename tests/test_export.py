@@ -82,6 +82,7 @@ class FakeProject:
         self.hide_codec = hide_codec
         self.mode = 1
         self.settings = {'TargetDir': '/user/exports', 'Name': 'Timeline Name token', 'ExportVideo': True,
+                         'FormatWidth': 1080, 'FormatHeight': 1920,
                          'ExportAudio': False, 'SelectAllFrames': False, 'MarkIn': 90000, 'MarkOut': 90490,
                          'AudioCodec': 'lpcm', 'AudioBitDepth': 24}
         self.presets, self.jobs, self.counter = {}, {}, 0
@@ -115,7 +116,7 @@ class FakeProject:
         job = {'JobId': str(self.counter), 'TargetDir': s['TargetDir'], 'OutputFilename': s['Name'] + '.' + self.fc['format'],
                'MarkIn': s['MarkIn'], 'MarkOut': s['MarkOut'], 'IsExportVideo': s['ExportVideo'],
                'IsExportAudio': s['ExportAudio'], 'AudioCodec': s['AudioCodec'], 'AudioBitDepth': s['AudioBitDepth'],
-               'VideoCodec': CODEC_NAMES[self.fc['codec']]}
+               'VideoCodec': CODEC_NAMES[self.fc['codec']], 'FormatWidth': s['FormatWidth'], 'FormatHeight': s['FormatHeight']}
         self.jobs[job['JobId']] = job
         return job['JobId']
 
@@ -128,7 +129,7 @@ class FakeProject:
     def LoadRenderPreset(self, name):
         if name not in self.presets:
             return False
-        keep = {k: self.settings[k] for k in ('AudioCodec', 'AudioBitDepth', 'Name')}
+        keep = {k: self.settings[k] for k in ('AudioCodec', 'AudioBitDepth', 'Name', 'FormatWidth', 'FormatHeight')}
         fc = dict(self.fc)
         self.settings, self.fc = copy.deepcopy(self.presets[name])
         self.settings.update(keep)
@@ -146,6 +147,17 @@ def simulate_export(ex, project):
     project.SetRenderSettings({'TargetDir': '/tmp/ai-review-x', 'ExportVideo': True, 'ExportAudio': True,
                                'SelectAllFrames': False, 'MarkIn': 90010, 'MarkOut': 90300})
     return snap, ex.restore(project, snap, '__backup')
+
+
+def test_fixed_size_is_restored_after_exporting_at_timeline_size(ex):
+    project = FakeProject()
+    project.settings.update(FormatWidth=720, FormatHeight=1280)
+    snap = ex.snapshot(project)
+    project.SaveAsNewRenderPreset('__backup')
+    project.SetRenderSettings({'FormatWidth': 1080, 'FormatHeight': 1920})
+    assert ex.restore(project, snap, '__backup') == ['FormatHeight', 'FormatWidth']  # a preset doesn't restore size
+    assert ex.restore(project, snap, '__backup', size_changed=True) == []
+    assert (project.settings['FormatWidth'], project.settings['FormatHeight']) == (720, 1280)
 
 
 def test_prores_with_lpcm_is_restored_exactly(ex):

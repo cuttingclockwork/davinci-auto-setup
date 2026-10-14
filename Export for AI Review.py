@@ -192,7 +192,7 @@ def snapshot(project):
             'format_codec': fc, 'render_mode': project.GetCurrentRenderMode()}
 
 
-def restore(project, snap, preset):
+def restore(project, snap, preset, size_changed=False):
     """Put the Deliver page back and compare every field Resolve exposes."""
     job, fc = snap['job'], snap['format_codec']
     problems = []
@@ -208,6 +208,11 @@ def restore(project, snap, preset):
                                       'ExportAudio': job['IsExportAudio'], 'SelectAllFrames': False,
                                       'MarkIn': job['MarkIn'], 'MarkOut': job['MarkOut']}):
         problems.append('render settings')
+    if size_changed:
+        # Only a size the user had set differently from the timeline is ever
+        # changed, so setting it back as fixed numbers restores it faithfully.
+        if not project.SetRenderSettings({'FormatWidth': job['FormatWidth'], 'FormatHeight': job['FormatHeight']}):
+            problems.append('resolution')
     for key in RESTORABLE_JOB_KEYS:
         if key in job:
             # One key per call: a key the format rejects must not block the rest.
@@ -259,6 +264,11 @@ def export(app, output_folder=None):
         raise Stop('The output folder does not exist: %s' % folder)
 
     snap = snapshot(project)
+    size = (int(timeline.GetSetting('timelineResolutionWidth') or 0), int(timeline.GetSetting('timelineResolutionHeight') or 0))
+    # Export at the timeline's own resolution. When Deliver already matches it
+    # (for example "Timeline Resolution"), the size is left alone, because a
+    # script cannot check whether that choice would survive being set.
+    size_changed = min(size) > 0 and (snap['job'].get('FormatWidth'), snap['job'].get('FormatHeight')) != size
     preset = '__ai_review_backup_%s' % datetime.now().strftime('%Y%m%d_%H%M%S')
     if not project.SaveAsNewRenderPreset(preset):
         raise Stop('Resolve could not save a backup of the Deliver settings. Nothing was changed.')
@@ -272,15 +282,18 @@ def export(app, output_folder=None):
         if not project.SetRenderSettings({'TargetDir': str(work), 'ExportVideo': True, 'ExportAudio': True,
                                           'SelectAllFrames': False, 'MarkIn': first, 'MarkOut': end - 1}):
             raise Stop('Resolve refused the export settings.')
+        if size_changed and not project.SetRenderSettings({'FormatWidth': size[0], 'FormatHeight': size[1]}):
+            raise Stop('Resolve refused the timeline resolution for this export.')
         job_id = project.AddRenderJob()
         if not job_id:
             raise Stop('Resolve refused the export job.')
         job = find_job(project, job_id) or {}
         if Path(job.get('TargetDir') or '').resolve() != work.resolve() or job.get('MarkIn') != first \
-                or job.get('MarkOut') != end - 1 or not str(job.get('OutputFilename', '')).lower().endswith('.mp4'):
+                or job.get('MarkOut') != end - 1 or not str(job.get('OutputFilename', '')).lower().endswith('.mp4') \
+                or (size_changed and (job.get('FormatWidth'), job.get('FormatHeight')) != size):
             raise Stop('The queued export does not match what was asked; nothing was rendered.')
         # The job keeps its own settings, so the Deliver page goes back before rendering.
-        problems = restore(project, snap, preset)
+        problems = restore(project, snap, preset, size_changed)
         if problems:
             raise Stop('Your Deliver settings could not be put back exactly (%s); nothing was rendered.'
                        % ', '.join(problems))
@@ -305,7 +318,7 @@ def export(app, output_folder=None):
         if job_id and find_job(project, job_id):
             project.DeleteRenderJob(job_id)
         # Starting a render may reload Deliver settings; check once more.
-        problems = restore(project, snap, preset)
+        problems = restore(project, snap, preset, size_changed)
         if problems:
             warnings.append('Your Deliver settings could not be put back exactly: %s. The backup preset "%s" was '
                             'kept; load it on the Deliver page to get your settings back.' % (', '.join(problems), preset))

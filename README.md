@@ -65,7 +65,8 @@ Want feedback on an edit from an AI model? It needs a video file. This script ma
 
 What it does:
 
-- **Uses your own Deliver settings.** An MP4 stays as you set it (codec, resolution, bitrate). Any other format, such as ProRes, becomes MP4/H.264 for this export, because AI tools need a file they can upload.
+- **Exports at the timeline's resolution**, so the AI sees the frame as you edited it. If the Deliver page already matches it (for example "Timeline Resolution"), nothing is changed; a different size is set back afterwards.
+- **Uses your own codec settings.** An MP4 stays as you set it (codec, bitrate). Any other format, such as ProRes, becomes MP4/H.264 for this export, because AI tools need a file they can upload.
 - **Always exports video with sound**, the whole timeline by default.
 - **Never overwrites a file.** If the name exists, it adds a number.
 - **Puts the Deliver page back** and checks every setting Resolve lets a script read: format and codec, audio, range, folder, file name. It never changes your file name setting, so a "Timeline Name" file name keeps following the timeline. If something can't be put back, it keeps a backup preset and tells you which one to load.
@@ -133,7 +134,7 @@ The report lists the measurements and the reason for the choice under **AUDIO**.
 
 **Export for AI Review**
 
-- **The file can be large.** It uses your own MP4 bitrate; a 30 Mb/s preset makes about 75 MB for 20 seconds. That uploads fine to Gemini and ChatGPT. Pick a lighter preset on the Deliver page first if you need a smaller file.
+- **The file can be large.** It uses your own MP4 bitrate at the timeline's resolution; a 30 Mb/s preset makes about 75 MB for 20 seconds. That uploads fine to Gemini and ChatGPT. Pick a preset with a lower bitrate first if you need a smaller file.
 - **Subtitles** are exported the way your Deliver page is set (burned in or not); the script doesn't change that.
 - **Settings Resolve doesn't let scripts read**, such as quality and hardware encoding, are restored through a backup preset but can't be checked one by one. In tests with an MP4/H.265 preset the export afterwards was identical to before.
 - **Individual clips** mode isn't supported; the script asks you to switch to Single clip.
