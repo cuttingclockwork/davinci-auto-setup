@@ -27,8 +27,8 @@ The fifth script, **Export for AI Review**, turns the timeline you are editing i
 
 ## Requirements
 
-- **DaVinci Resolve 21.** Developed and tested on Resolve Studio 21.1 for macOS. The free version and Windows are supported in the code but have not been tested yet. Please open an issue if something breaks.
-- **No separate Python needed on Resolve 21.1 or newer.** Resolve runs scripts from the Workspace › Scripts menu with its own built-in Python. Only on Resolve 21.0 do you need Python 3.10 or newer, installed system-wide:
+- **DaVinci Resolve Studio 21.1 or newer.** From Resolve 21.1 on, Blackmagic runs Python scripts in Studio only: in the free edition `.py` files are not listed under Workspace › Scripts, and the Console has no Py3 tab (measured on the free edition for Windows, 16 Nov 2026; Blackmagic's 21.1 release notes say "Advanced scripting now requires DaVinci Resolve Studio"). Developed and tested on Resolve Studio 21.1 and 21.2 for macOS. Windows is supported in the code but has not been tested yet. Please open an issue if something breaks.
+- **No separate Python needed on Resolve Studio 21.1 or newer.** Resolve runs scripts from the Workspace › Scripts menu with its own built-in Python. Only on Resolve Studio 21.0 do you need Python 3.10 or newer, installed system-wide:
   - macOS: usually already installed. Otherwise use [python.org](https://www.python.org/downloads/).
   - Windows: install from [python.org](https://www.python.org/downloads/) and tick **"Add python.exe to PATH"**.
 - **FFmpeg** (`ffmpeg` and `ffprobe`), used by the four timeline scripts to read metadata and analyse sound. Export for AI Review doesn't need it.

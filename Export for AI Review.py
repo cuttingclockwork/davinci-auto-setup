@@ -6,7 +6,7 @@ The Deliver page is put back the way it was and checked afterwards.
 See README.md for installation, settings and known limitations.
 """
 
-VERSION = '1.0.0'  # https://github.com/cuttingclockwork/davinci-auto-setup
+VERSION = '1.0.1'  # https://github.com/cuttingclockwork/davinci-auto-setup
 
 # ---------------------------------------------------------------------------
 # SETTINGS: the only part most people need to change.

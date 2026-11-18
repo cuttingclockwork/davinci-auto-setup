@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 — 2026-11-18
+
+Documentation only; the scripts work exactly as in 1.0.0.
+
+- **Requirements now say DaVinci Resolve Studio 21.1 or newer.** From Resolve 21.1 on, Blackmagic runs Python scripts in Studio only. In the free edition the scripts don't appear under Workspace › Scripts and the Console has no Py3 tab (checked on the free edition for Windows). 1.0.0 still listed the free version as "supported in the code, not tested yet".
+
 ## 1.0.0 — 2026-11-13
 
 First public release.

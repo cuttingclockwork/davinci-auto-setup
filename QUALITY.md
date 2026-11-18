@@ -2,7 +2,11 @@
 
 *Before the first public release (1.0.0, 13 November 2026) the scripts were developed in stages called 1.0.0, 1.1.0 and 1.2.0; the sections below keep those names. Everything in them is part of the public 1.0.0.*
 
-This file records the checks behind each release. The code is written by Claude (Anthropic's AI assistant); Cutting Clockwork tests it on real footage.
+This file records the checks behind each release.
+
+## 1.0.1 (18 November 2026): documentation only
+
+Only `README.md`, `CHANGELOG.md`, this file and the `VERSION` line in the five scripts changed; no logic. The new requirement was measured, not assumed: on a Windows PC with the free edition of Resolve, the scripts in `…\Support\Fusion\Scripts\Utility\` did not appear under Workspace › Scripts, and the Console offered Lua only (16 November 2026). This matches Blackmagic's 21.1 release notes ("Advanced scripting now requires DaVinci Resolve Studio"), found and checked by Antigravity. All 140 automated tests pass. No Antigravity code review for this patch: there is no code change to review. The code is written by Claude (Anthropic's AI assistant); Cutting Clockwork tests it on real footage.
 
 ## 1.2.0: recorder linked to the picture (13 November 2026)
 
