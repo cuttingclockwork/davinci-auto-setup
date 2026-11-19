@@ -4,6 +4,41 @@
 
 This file records the checks behind each release.
 
+## 1.0.1, replaced (19 November 2026): sync fixes
+
+**Found by** Cutting Clockwork's own test on a real multi-day shoot (Sony A7 IV with Rec Run timecode, iPhone 16 Pro with the Blackmagic Camera app, 129 clips over about ten days, long stretches of sanding and sawing), measured by Antigravity on the timeline and in the source audio.
+
+**Causes (measured outside Resolve, same code; Resolve's report of that run reproduced exactly):**
+1. *Wrong clock for a whole day.* The wide search keeps one best match per clip pair. On 28 July two such matches (repetitive noise) agreed on −3218.6 s; the old rule accepted the first pair of agreeing clips with the most weight and never tested that offset on the other clips of the day. At the true offset (−3018.4 s) three other clips match (r 0.62–0.90) and one is confirmed by the 1 kHz waveform; at −3218.6 s none is.
+2. *Reference clips a second apart.* The reference camera kept its own clock per clip; a Sony with Rec Run timecode gives that clock in whole seconds. An iPhone clip synced on C1210 also runs over C1209, which sat 0.54 s off.
+
+**Fixes:** `consensus_anchor` and `day_votes` (every candidate offset tested on every clip of the day, one vote per clip, ≥ 2 independent clips, 1.3× margin; ties broken by the waveform, then by another day's proven clock, else reported); a second pass that also tests other days' proven clocks (same proof needed); `refine_reference_clips` (reference clips lined up through a frame-accurate clip or recorder that runs over two of them, at most 1.2 s, the whole tree of synced clips moves along, no move that makes the camera overlap itself); `shoot_days` (local date, a shoot past midnight stays one day); `local_match` (direct Pearson for a narrow window, same score as the FFT path); shorter report lines; proxy-only files named in the report.
+
+**Measured after the fix** (`verify.py`: own 10 Hz envelope, numpy correlation per overlapping camera pair, ± 3 s):
+
+| Footage | Result |
+|---|---|
+| Multi-day shoot, 129 clips (Reels) | 24 July unchanged; 28 July −3218.6 → −3018.4 s; C1209 moved +0.513 s (13.5 → 0.7 frames); 1 August newly synced (−3016.45 s, waveform-confirmed; clock drift −3020.2 / −3018.4 / −3016.45 s over the days). All 12 clearly matching pairs (r ≥ 0.5) within 0.7 frames. |
+| Cutting Clockwork test shoot: Sony A7 IV, Nikon Z fc, 4 Røde Wireless PRO files (50 items) | Nothing moved. |
+| Real shoot, 257 clips (Sony A7 IV + iPhone 16 Pro, YouTube) | Nothing moved, same report notes. 120 clearly matching pairs; 118 within a frame by `verify.py`. The other two (a 40 s and a 24 s phone clip of speech) the 10 Hz check puts 0.79 s and 0.11 s off, but its peak there is flat (r 0.87 at the script's position, 0.90 at 0.74 s); the script's 1 kHz waveform (score 0.74 and 0.61) and the spectral check both confirm the script's position, so these are limits of the check, not of the sync. |
+
+**Automatic checks:** 149 tests pass (new: consensus against two chance matches, clusters before single peaks in the offsets tested, an empty camera clock (1970) and odd times, tie and tie-break, two-clip rule, one vote per clip, local search = full search, shoot past midnight, generated clips with a reference clip 0.4 s off its whole-second time, proxy note). Ruff (F, E9, B, PLE, PLW) and Bandit (medium/high): the same notes as before, nothing new.
+
+**Antigravity review:** Antigravity (Gemini 4 Neon XHigh, read-only, 19 November 2026; `github/reviews/davinci-auto-setup-1.0.1-sync-fix-antigravity.md`, not published): two blocking, five important, four small points. All handled:
+1. *(blocking)* A single take was checked only on its best vote. Now the waveform check tries the clip's best fits, then its other fits, then the wide-search candidates, up to 15 in that order.
+2. *(blocking)* The 12 offsets tested could be filled with scattered chance matches. Offsets are now clustered first (`candidate_offsets`), clusters of several clips before single peaks; other days' clocks come on top of the 12. Test added.
+3. *(important)* `datetime.fromtimestamp` can fail on Windows around 1970. `local_time` falls back safely (also for the multicam name), and `parse_time` refuses times before 1971 (an empty camera clock). Test added.
+4. *(important)* Clock drift between days could exceed the 2 s search. Another day's clock is now searched both ± 2 s and ± 10 s (`PRIOR_DRIFT_SECONDS`), and the overlap pre-check allows for that margin. On the multi-day shoot the drift was 1.8–1.95 s per gap.
+5. *(important)* Overlap check in `refine_reference_clips` ran once. Now repeated until nothing changes, silent clips of the reference camera count, evidence is written only for moves that are kept, clearer wording.
+6. *(important)* A clip's vote is now chosen on score × overlap, like everywhere else.
+7. *(important)* Placeholder in CHANGELOG and QUALITY not yet filled: they were being written during the review; done.
+8. *(small)* Per-app anchors only when one phone used more than one app that day (no double runs or evidence).
+9. *(small)* Links between reference clips are taken best first over several steps (priority queue).
+10. *(small)* (a) done with 5; (b) clips matched on loudness only don't move along with a reference clip: left as is, they are only accurate to 0.1 s anyway and the shift is under a second.
+11. *(small)* `shoot_days` now uses its own constant (3 h), so `SHOOT_GAP_HOURS` stays multicam-only; README lines on per-day counts updated; the proxy note appears only for a proxy that was really used.
+
+After these changes all measurements above were repeated with the final code: the same results (multi-day shoot identical to the checked placement; test shoot and the 257-clip shoot: nothing moved). One review round per version: no second review.
+
 ## 1.0.1 (18 November 2026): documentation only
 
 Only `README.md`, `CHANGELOG.md`, this file and the `VERSION` line in the five scripts changed; no logic. The new requirement was measured, not assumed: on a Windows PC with the free edition of Resolve, the scripts in `…\Support\Fusion\Scripts\Utility\` did not appear under Workspace › Scripts, and the Console offered Lua only (16 November 2026). This matches Blackmagic's 21.1 release notes ("Advanced scripting now requires DaVinci Resolve Studio"), found and checked by Antigravity. All 140 automated tests pass. No Antigravity code review for this patch: there is no code change to review. The code is written by Claude (Anthropic's AI assistant); Cutting Clockwork tests it on real footage.

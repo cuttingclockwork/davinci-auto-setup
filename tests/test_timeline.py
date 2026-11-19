@@ -9,6 +9,7 @@ import importlib.util
 
 import random
 import shutil
+from datetime import date, datetime
 from array import array
 import subprocess
 import wave
@@ -112,6 +113,92 @@ def test_match_envelopes_rejects_too_little_overlap(yt):
     assert yt.match_envelopes([1.0] * 50, [1.0] * 1000, min_overlap=35) is None
 
 
+def test_local_search_gives_the_same_score_as_the_full_search(yt):
+    rng = random.Random(3)
+    reference = [rng.random() for _ in range(3000)]
+    source = [x + rng.uniform(-.3, .3) for x in reference[1000:1600]]
+    wide = yt.match_envelopes(source, reference, min_overlap=20)
+    near = yt.match_envelopes(source, reference, min_overlap=20, expected_lag=-99.0, lag_tolerance=2.0)
+    assert near[1] == pytest.approx(wide[1]) == pytest.approx(-100.0)
+    assert near[0] == pytest.approx(wide[0], abs=1e-9)
+
+
+def vote(source, reference, offset, score=.9, overlap=60):
+    return {'source': {'path': source, 'timestamp': 0.0}, 'reference': {'path': reference, 'timestamp': 0.0},
+            'offset': offset, 'score': score, 'overlap': overlap, 'lag': 0.0}
+
+
+def test_consensus_prefers_the_clock_most_clips_agree_on(yt):
+    """Test footage 19 Nov 2026: two chance matches on repeated sanding noise agreed on
+    -3218.6 s, so the old rule (first pair of agreeing clips wins) moved a whole day 200 s.
+    Three other clips agreed on -3018.5 s."""
+    votes = [vote('c151', 'C1231', -3218.6, .95), vote('c139', 'C1224', -3218.5, .68),
+             vote('c140', 'C1225', -3018.4, .62), vote('c145', 'C1230', -3018.5, .90),
+             vote('c149', 'C1231', -3018.6, .93)]
+    anchor = yt.consensus_anchor(votes)
+    assert anchor['offset'] == pytest.approx(-3018.5) and not anchor['ambiguous']
+    assert {v['source']['path'] for v in anchor['matches']} == {'c140', 'c145', 'c149'}
+
+
+def test_consensus_reports_a_tie_and_uses_another_days_clock_to_break_it(yt):
+    votes = [vote('a', 'R1', -100.0), vote('b', 'R2', -100.2), vote('c', 'R1', 40.0), vote('d', 'R3', 40.1)]
+    tie = yt.consensus_anchor(votes)
+    assert tie['ambiguous'] and {tie['offset'], tie['runner_up']} == {-100.0, 40.1}
+    settled = yt.consensus_anchor(votes, prior=[38.0])
+    assert settled['offset'] == pytest.approx(40.1) and not settled['ambiguous']
+
+
+def test_consensus_needs_two_independent_clips(yt):
+    assert yt.consensus_anchor([vote('a', 'R1', 5.0)]) is None
+    # Two clips on the same reference clip with a weak score are no proof either.
+    assert yt.consensus_anchor([vote('a', 'R1', 5.0, .7), vote('b', 'R1', 5.2, .9)]) is None
+    assert yt.consensus_anchor([vote('a', 'R1', 5.0, .8), vote('b', 'R2', 5.2, .6)])['offset'] in (5.0, 5.2)
+
+
+def test_day_votes_each_clip_votes_once_for_its_best_fit(yt):
+    """A long clip of repetitive noise fits two clocks; it must not support both."""
+    rng = random.Random(5)
+    noise = [rng.random() for _ in range(6000)]          # 600 s at 10 Hz
+    reference = {'path': 'R', 'timestamp': 1000.0, 'duration': 600.0}
+    clips = {'R': noise}
+    sources = []
+    for name, start in (('s1', 50), ('s2', 250), ('s3', 400)):
+        clips[name] = noise[start * 10:(start + 100) * 10]
+        # The clip's own clock is 300 s behind the reference camera.
+        sources.append({'path': name, 'timestamp': 1000.0 + start - 300, 'duration': 100.0})
+    votes = yt.day_votes(sources, [reference], [(300.0, 2.0), (120.0, 2.0)], lambda row: clips[row['path']])
+    assert sorted(votes) == ['s1', 's2', 's3']
+    assert all(v['offset'] == pytest.approx(300.0) for v in votes.values())
+
+
+def test_offsets_shared_by_several_clips_come_before_single_peaks(yt):
+    """Review 19 Nov 2026: 12 scattered chance matches must not push a real cluster out."""
+    noise = [vote('n%d' % i, 'R%d' % i, 100.0 * i, .9) for i in range(1, 15)]
+    real = [vote('a', 'R1', -50.0, .65), vote('b', 'R2', -50.3, .66), vote('c', 'R3', -49.9, .64)]
+    tested = yt.candidate_offsets(noise + real, extra=[-48.0, 700.0, 2000.0])
+    assert tested[0] == (-50.3, 2.0)   # the cluster, at its strongest clip
+    assert len(tested) == 14 and tested[12:] == [(2000.0, 2.0), (2000.0, yt.PRIOR_DRIFT_SECONDS)]
+    # Another day's clock comes on top of the day's own 12, narrow and wide;
+    # one close to an offset already tested is left out.
+
+
+def test_empty_camera_clock_and_odd_times_do_not_crash(yt):
+    assert yt.parse_time('1970-01-01T00:00:00Z') is None
+    assert yt.parse_time('1970-01-01T00:00:00+02:00') is None
+    for value in (-7200.0, 0.0, 1e12):
+        assert isinstance(yt.local_time(value), datetime)
+
+
+def test_shoot_day_runs_past_midnight(yt):
+    start = datetime(2026, 7, 28, 23, 0).timestamp()
+    rows = [{'camera': 'A', 'path': 'a1', 'timestamp': start, 'duration': 1800},
+            {'camera': 'A', 'path': 'a2', 'timestamp': start + 2 * 3600, 'duration': 600},   # 01:00
+            {'camera': 'A', 'path': 'a3', 'timestamp': start + 12 * 3600, 'duration': 600}]  # 11:00
+    days = yt.shoot_days(rows)
+    assert days['a1'] == days['a2'] == date(2026, 7, 28)
+    assert days['a3'] == date(2026, 7, 29)
+
+
 # --- track layout ----------------------------------------------------------
 
 def test_simultaneous_clips_of_one_camera_get_an_extra_track(yt):
@@ -145,6 +232,14 @@ def test_select_media_paths_skips_proxies_hidden_files_and_links(yt, tmp_path):
     names = sorted(p.name for p in found)
     assert names == ['clip1.mp4', 'orphan.mp4']
     assert found.ignored == 2
+    # A proxy that stands in for a missing original is named in the report.
+    orphan = tmp_path / 'A' / 'Proxy' / 'orphan.mp4'
+    assert found.proxies == [orphan]
+    # Named in the report only when it was really used (not skipped, e.g. as a portrait clip).
+    assert yt.proxy_note([{'path': str(orphan.resolve())}], found.proxies) == [
+        '1 proxy file(s) used because the original is missing (first: %s). '
+        'Put the originals back in the folder for full quality.' % orphan.resolve()]
+    assert yt.proxy_note([], found.proxies) == []
 
 
 # --- real clips (FFmpeg) ------------------------------------------------------
@@ -246,6 +341,42 @@ def test_audio_sync_corrects_a_wrong_camera_clock(yt, tmp_path, audio_codec, rat
     assert by_name['b1.mov']['sort_time'] - start == pytest.approx(10.0, abs=.04)   # within one frame
     assert by_name['b2.mov']['sort_time'] - start == pytest.approx(70.0, abs=.04)
     assert by_name['b1.mov']['sync_method'] in yt.CONFIRMED_SYNC
+
+
+@needs_ffmpeg
+def test_reference_clips_on_whole_seconds_are_lined_up_by_sound(yt, tmp_path):
+    """Test footage 19 Nov 2026: a Sony stores whole seconds, so its second clip sat 0.54 s
+    beside a phone clip that ran over both Sony clips. Here clip a2 really starts at 70.4 s
+    but its file says 70 s; camera B's clip b1 runs over a1 and a2."""
+    rng = random.Random(11)
+    rate = 8000
+    envelope = []
+    while len(envelope) < 130 * 10:
+        envelope.extend([rng.choice((.05, .3, .9))] * rng.randint(2, 12))
+    samples = [envelope[i * 10 // rate] * rng.uniform(-1, 1) for i in range(130 * rate)]
+    def piece(name, start, seconds):
+        first = round(start * rate)
+        return write_wav(tmp_path / name, samples[first:first + round(seconds * rate)], rate)
+    (tmp_path / 'A').mkdir()
+    (tmp_path / 'B').mkdir()
+    pcm = {'audio_codec': 'pcm_s16le'}
+    make_clip(tmp_path / 'A' / 'a1.mov', 320, 180, 25, 60, piece('a1.wav', 0, 60), '2026-10-01T10:00:00Z', **pcm)
+    make_clip(tmp_path / 'A' / 'a2.mov', 320, 180, 25, 59, piece('a2.wav', 70.4, 59), '2026-10-01T10:01:10Z', **pcm)
+    # Camera B's clock is 37 s fast.
+    make_clip(tmp_path / 'B' / 'b1.mov', 320, 180, 25, 60, piece('b1.wav', 40, 60), '2026-10-01T10:01:17Z', **pcm)
+    make_clip(tmp_path / 'B' / 'b2.mov', 320, 180, 25, 25, piece('b2.wav', 102, 25), '2026-10-01T10:02:19Z', **pcm)
+    ffprobe, ffmpeg = yt.binaries()
+    rows, excluded = yt.inspect_sources(yt.select_media_paths(tmp_path), ffprobe)
+    rows = [r for r in rows if not r.get('recorder')]   # the helper wavs above
+    assert not excluded and len(rows) == 4
+    evidence, warnings, reference = yt.sync_audio(rows, ffmpeg)
+    yt.refine_reference_clips(rows, [], ffmpeg, warnings, evidence)
+    by_name = {r['name']: r for r in rows}
+    start = by_name['a1.mov']['sort_time']
+    assert reference == by_name['a1.mov']['camera']
+    for name, real in (('a2.mov', 70.4), ('b1.mov', 40.0), ('b2.mov', 102.0)):
+        assert by_name[name]['sort_time'] - start == pytest.approx(real, abs=.02), name   # half a frame
+    assert any(e.get('reference_clip') in ('a1.mov', 'a2.mov') for e in evidence)
 
 
 @pytest.fixture(scope='module')

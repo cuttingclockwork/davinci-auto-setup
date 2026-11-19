@@ -15,7 +15,7 @@ DaVinci Resolve scripts for the start and the end of an edit. Four of them turn 
 
 One click, and the script:
 
-- imports every video in the folder (subfolders included), skipping proxies, photos and helper files, and finds separate audio recordings (WAV and similar) by their sound;
+- imports every video in the folder (subfolders included), skipping proxies (a proxy without its original is used and named in the report), photos and helper files, and finds separate audio recordings (WAV and similar) by their sound;
 - gives each camera its own video and audio track, and each recorder its own audio track;
 - **syncs the cameras by sound**, even when their clocks are wrong (by up to 3 hours by default);
 - sets the **colour profile per camera** under DaVinci Resolve Color Management (output Rec.709 Gamma 2.4);
@@ -140,7 +140,7 @@ CAMERA_PROFILES = {
 
 When none of these applies, the clip stays Rec.709 and the report tells you which camera to add to `CAMERA_PROFILES`.
 
-**Sync.** Recording times give a first guess. The script then matches the sound of every camera against the reference camera. A clock correction is trusted when at least two independent clips agree. A camera with a single take (one long recording) gets its correction from one match only when the waveform itself confirms it; the report then asks you to check that sync once by eye. After that, each clip is fine-tuned on its own waveform.
+**Sync.** Recording times give a first guess. The script then matches the sound of every camera against the reference camera. A clock correction is trusted when at least two independent clips agree, and every candidate correction is tested on all clips of that day: the one most clips agree on wins, so repeated noise (sanding, sawing, music) can't pull a whole day off. If two corrections fit almost equally well, the report says so. Clips of the reference camera that the same clip of another camera runs over are lined up with each other by sound too, because some cameras store their recording time in whole seconds. A camera with a single take (one long recording) gets its correction from one match only when the waveform itself confirms it; the report then asks you to check that sync once by eye. After that, each clip is fine-tuned on its own waveform.
 
 **Which audio you hear.** Sync and sound are decided separately:
 
@@ -171,10 +171,10 @@ The report lists the measurements and the reason for the choice under **AUDIO**.
 **Timeline scripts**
 
 - **Mixed frame rates judder.** Resolve plays a 30 fps clip on a 25 fps timeline by skipping frames. The report warns you. The fix is to record every camera at the same frame rate, or a multiple of it (25 + 50, or 30 + 60).
-- **Sync needs shared sound.** A camera without audio, or one that recorded something else (like a GoPro on the outside of a car), falls back to its own clock. The report says which clips aren't confirmed.
+- **Sync needs shared sound.** A camera without audio, or one that recorded something else (like a GoPro on the outside of a car), falls back to its own clock. The report says, per day, how many clips aren't confirmed.
 - **Audio files need shared sound.** A recorder file is found by matching its sound to the cameras, because recorders rarely store a recording time. A file without matching sound (music, a voice-over, another shoot) isn't placed; the report lists it. Tested with a Røde Wireless PRO; other recorders should work the same way.
 - **Short phone clips with voice processing.** Phones that clean up your voice (noise suppression, voice isolation) change the sound so much that a short clip from a phone without other clips can't be confirmed by sound. It then keeps the phone's own clock, and the report says so. Film with the phone for longer stretches, or record more than one clip with it.
-- **Very short clips** (under about 4 seconds) can't be matched by sound. When their camera has no other matched clips, they follow that camera's own clock, which may be minutes off. The report names them.
+- **Very short clips** (under about 4 seconds) can't be matched by sound. When their camera has no other matched clips, they follow that camera's own clock, which may be minutes off. The report counts them per day.
 - **Wrong camera clocks.** Clocks off by more than `CLOCK_TOLERANCE_HOURS` aren't matched.
 - **Reels crops landscape clips in the centre.** A 16:9 shot keeps only the middle ~32% of its width. Someone standing on the left or right third is (partly) cut off. Reposition those clips by hand. Sharp 9:16 crops also need 4K footage: 1080p landscape footage gets upscaled almost 1.8× and looks softer.
 - **Log footage from unknown cameras** is treated as Rec.709 until you add the camera to `CAMERA_PROFILES`.
@@ -199,6 +199,7 @@ The scripts are plain Python. To make them fit your own setup (another camera, a
 | Cameras | Situation | Resolve | System | Result |
 |---|---|---|---|---|
 | Sony A7 IV (S-Log3 + XML) and iPhone 16 Pro (Blackmagic Camera app, HLG) | Two shoots: 155 clips over a day, and 1.5 hours with long Sony takes; phone clock about 51 minutes off | Studio 21.1.1 | macOS | Synced within one frame; Multicam: one multicam per shoot |
+| Sony A7 IV (Rec Run timecode) and iPhone 16 Pro (Blackmagic Camera app) | 129 clips over about ten days, a lot of sanding and sawing noise; phone clock about 50 minutes off | Studio 21.2; the fix measured on the source audio, outside Resolve | macOS | Every clearly matching camera pair within one frame (1.0.1) |
 | Generated test clips | Other brands' metadata (Canon, Panasonic, Fujifilm, Nikon, GoPro, DJI, Samsung, Pixel), 23.976–60 fps, 29.97 drop-frame, clocks off by seconds to hours, single takes, no sound, odd file names | Studio 21.1.1 (multicam) and automated tests | macOS | See [QUALITY.md](QUALITY.md) |
 
 **Used it with other gear?** Open an [issue](https://github.com/cuttingclockwork/davinci-auto-setup/issues) with your cameras and the `.txt` report, whether it worked or not, and this table grows.

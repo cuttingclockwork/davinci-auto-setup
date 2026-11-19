@@ -8,17 +8,19 @@ See README.md for installation, settings and known limitations.
 from __future__ import annotations
 from array import array
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
 import json
 import hashlib
+import heapq
 import os
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 import filecmp
 import math
+import operator
 import re
 import shutil
 import subprocess
@@ -89,6 +91,8 @@ AUDIO_SUFFIXES = {'.wav', '.aif', '.aiff', '.flac', '.m4a', '.mp3'}
 SAMPLE_RATE = 400
 ENVELOPE_HZ = 10
 MAX_CLOCK_ERROR_SECONDS = CLOCK_TOLERANCE_HOURS * 3600
+PRIOR_DRIFT_SECONDS = 10.0   # how far a camera clock may drift between shoot days
+SYNC_DAY_GAP_HOURS = 3       # a pause this long starts a new day for the sync
 MIN_MATCH_SCORE = 0.55
 MIN_MATCH_OVERLAP = 35
 SUPPORTED_TIMELINE_RATES = (23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0)
@@ -523,7 +527,8 @@ def parse_time(value):
     except (TypeError, ValueError):
         return None
     # Camera-local metadata without an offset cannot safely be compared to UTC.
-    if date.tzinfo is None or date.year < 1970:
+    # An empty camera clock often reads 1970; such a time is no recording time.
+    if date.tzinfo is None or date.astimezone(timezone.utc).year < 1971:
         return None
     return date.astimezone(timezone.utc).timestamp()
 
@@ -865,6 +870,11 @@ def match_envelopes(a, b, min_overlap=MIN_MATCH_OVERLAP, hz=ENVELOPE_HZ,
     """Return (Pearson score, lag seconds, overlap seconds); lag indexes a against b."""
     if len(a) < min_overlap * hz or len(b) < min_overlap * hz:
         return None
+    if expected_lag is not None:
+        lags = range(math.ceil((expected_lag - lag_tolerance) * hz),
+                     math.floor((expected_lag + lag_tolerance) * hz) + 1)
+        if len(lags) * min(len(a), len(b)) <= 4_000_000:
+            return local_match(a, b, lags, min_overlap, hz)
     n = 1 << (len(a) + len(b) - 2).bit_length()
     fa = fft(a + [0] * (n - len(a)))
     fb = fft(list(reversed(b)) + [0] * (n - len(b)))
@@ -898,33 +908,31 @@ def match_envelopes(a, b, min_overlap=MIN_MATCH_OVERLAP, hz=ENVELOPE_HZ,
     return best
 
 
+def local_match(a, b, lags, min_overlap, hz):
+    """The same Pearson score as match_envelopes, computed directly for a few lags."""
+    best = None
+    for lag in lags:
+        ai, az = max(0, lag), min(len(a), lag + len(b))
+        count = az - ai
+        if count < min_overlap * hz:
+            continue
+        xa, xb = a[ai:az], b[ai - lag:az - lag]
+        suma, sumb = math.fsum(xa), math.fsum(xb)
+        va = math.fsum(x * x for x in xa) - suma * suma / count
+        vb = math.fsum(x * x for x in xb) - sumb * sumb / count
+        if va <= .01 or vb <= .01:
+            continue
+        score = (math.fsum(map(operator.mul, xa, xb)) - suma * sumb / count) / math.sqrt(va * vb)
+        if best is None or score > best[0]:
+            best = (score, lag / hz, count / hz)
+    return best
+
+
 def audio_overlap_floor(duration):
     return min(20.0, max(3.0, duration * .7))
 
 
-def dominant_offset(candidates):
-    """A clock anchor requires matching sound from two independent clips."""
-    best = None
-    for candidate in candidates:
-        nearby = [c for c in candidates if abs(c['offset'] - candidate['offset']) <= 1.5]
-        unique = {c['source']['path']: c for c in nearby}
-        if len(unique) < 2:
-            continue
-        if (len(unique) == 2 and len({c['reference']['path'] for c in unique.values()}) == 1
-                and min(c['score'] for c in unique.values()) < .75):
-            continue
-        weight = sum(c['score'] * min(c['overlap'], 30) for c in unique.values())
-        if best is None or weight > best[0]:
-            best = (weight, nearby)
-    if best is None:
-        return None
-    cluster = best[1]
-    return {'offset': sorted(c['offset'] for c in cluster)[len(cluster) // 2],
-            'source_time': sorted(c['source']['timestamp'] for c in cluster)[len(cluster) // 2],
-            'matches': cluster}
-
-
-def confirmed_single_anchor(candidates, ffmpeg, tries=6):
+def confirmed_single_anchor(candidates, ffmpeg, tries=6, ordered=False):
     """Clock offset for a camera without matches from two clips, e.g. one long take.
 
     A single loudness match is not proof: on 155 real clips, chance matches
@@ -937,8 +945,9 @@ def confirmed_single_anchor(candidates, ffmpeg, tries=6):
     other takes of the same lines almost as well (0.81 against 0.82). Such a clip
     keeps its clock and the report asks to check it; a guess would be worse.
     """
-    ranked = sorted(candidates, key=lambda c: c['score'] * min(c['overlap'], 30), reverse=True)
-    for candidate in ranked[:tries]:
+    ranked = list(candidates) if ordered else sorted(
+        candidates, key=lambda c: c['score'] * min(c['overlap'], 30), reverse=True)[:tries]
+    for candidate in ranked:
         source, reference = candidate['source'], candidate['reference']
         position = reference['timestamp'] - candidate['lag']
         try:
@@ -1116,6 +1125,151 @@ def choose_reference_camera(rows, warnings):
     return max(dedicated or list(totals), key=totals.get)
 
 
+def local_time(timestamp):
+    """Local wall time; Windows refuses timestamps around 1970 and far in the future."""
+    try:
+        return datetime.fromtimestamp(timestamp)
+    except (OSError, OverflowError, ValueError):
+        return datetime(1970, 1, 1) + timedelta(seconds=min(max(timestamp, 0), 1e11))
+
+
+def shoot_days(rows):
+    """Local calendar day per clip; a shoot that runs past midnight keeps the day it began."""
+    days, by_camera = {}, defaultdict(list)
+    for row in rows:
+        by_camera[row['camera']].append(row)
+    for clips in by_camera.values():
+        day, end = None, None
+        for row in sorted(clips, key=lambda r: (r['timestamp'], r['path'])):
+            if end is None or row['timestamp'] > end + SYNC_DAY_GAP_HOURS * 3600:
+                day = local_time(row['timestamp']).date()
+                end = row['timestamp']
+            end = max(end, row['timestamp'] + row['duration'])
+            days[row['path']] = day
+    return days
+
+
+def shared_seconds(start, duration, reference):
+    return (min(start + duration, reference['timestamp'] + reference['duration'])
+            - max(start, reference['timestamp']))
+
+
+def overlaps_reference(source, references, offset, tolerance=0.0):
+    floor = audio_overlap_floor(source['duration'])
+    return any(shared_seconds(source['timestamp'] + offset, source['duration'], ref) >= floor - tolerance
+               for ref in references)
+
+
+def day_votes(sources, references, offsets, sound, others_out=None):
+    """Test each candidate clock on each clip of one camera-day; a clip votes once, for its best fit.
+
+    offsets: (offset, search tolerance in seconds) pairs. Every other fit that
+    passes the score goes to `others`, for the waveform check of a single take.
+    """
+    votes, others = {}, []
+    for source in sources:
+        floor = audio_overlap_floor(source['duration'])
+        minimum = .60 if source['duration'] < 30 else .50
+        best = None
+        for offset, tolerance in offsets:
+            start = source['timestamp'] + offset
+            for ref in references:
+                if shared_seconds(start, source['duration'], ref) < floor - tolerance:
+                    continue
+                match = match_envelopes(sound(source), sound(ref), floor,
+                                        expected_lag=ref['timestamp'] - start, lag_tolerance=tolerance)
+                if not match or match[0] < minimum:
+                    continue
+                score, lag, overlap = match
+                fit = {'source': source, 'reference': ref, 'score': score, 'lag': lag,
+                       'overlap': overlap, 'offset': ref['timestamp'] - source['timestamp'] - lag}
+                others.append(fit)
+                if best is None or score * min(overlap, 30) > best['score'] * min(best['overlap'], 30):
+                    best = fit
+        if best:
+            votes[source['path']] = best
+    if others_out is not None:
+        others_out.extend(f for f in others if all(f is not v for v in votes.values()))
+    return votes
+
+
+def consensus_anchor(votes, prior=(), ffmpeg=None):
+    """The clock offset that most independent clips agree on, if it clearly beats the next one.
+
+    A tie is broken by the 1 kHz waveform check (see confirmed_single_anchor)
+    or, failing that, by the clock another day of the same camera proved.
+    """
+    groups = []
+    for vote in sorted(votes, key=lambda v: v['score'] * min(v['overlap'], 30), reverse=True):
+        group = next((g for g in groups if abs(g[0]['offset'] - vote['offset']) <= 1.5), None)
+        if group is None:
+            groups.append([vote])
+        elif all(v['source']['path'] != vote['source']['path'] for v in group):
+            group.append(vote)
+    def weight(group):
+        return sum(v['score'] * min(v['overlap'], 30) for v in group)
+    def proven(group):
+        if len(group) < 2:
+            return False
+        return not (len(group) == 2 and group[0]['reference']['path'] == group[1]['reference']['path']
+                    and min(v['score'] for v in group) < .75)
+    def middle(group, field):
+        values = sorted(field(v) for v in group)
+        return values[len(values) // 2]
+    ranked = sorted((g for g in groups if proven(g)), key=weight, reverse=True)
+    if not ranked:
+        return None
+    best, runner = ranked[0], None
+    rivals = [g for g in ranked[1:] if weight(g) * 1.3 > weight(best)]
+    if rivals:
+        contenders = [best] + rivals
+        confirmed = [g for g in contenders if ffmpeg and waveform_confirms(g, ffmpeg)]
+        near = [g for g in contenders if prior and min(abs(middle(g, lambda v: v['offset']) - p) for p in prior) <= 30]
+        if len(confirmed) == 1:
+            best = confirmed[0]
+        elif len(near) == 1:
+            best = near[0]
+        else:
+            runner = rivals[0]
+    return {'offset': middle(best, lambda v: v['offset']),
+            'source_time': middle(best, lambda v: v['source']['timestamp']),
+            'matches': best, 'ambiguous': runner is not None,
+            'runner_up': middle(runner, lambda v: v['offset']) if runner else None}
+
+
+def waveform_confirms(group, ffmpeg, tries=3):
+    for vote in sorted(group, key=lambda v: v['score'], reverse=True)[:tries]:
+        try:
+            if precise_audio_position(vote['source'], vote['reference'],
+                                      vote['reference']['timestamp'] - vote['lag'], ffmpeg):
+                return True
+        except RECOVERABLE:
+            continue
+    return False
+
+
+def candidate_offsets(candidates, extra=()):
+    """Clock offsets worth testing on a whole day, as (offset, search tolerance) pairs.
+
+    Offsets that several clips already share come before single peaks, so a
+    busy day full of chance matches can't push the real clock out of the top 12.
+    """
+    clusters = []
+    for c in sorted(candidates, key=lambda c: c['score'] * min(c['overlap'], 30), reverse=True):
+        cluster = next((k for k in clusters if abs(k[0]['offset'] - c['offset']) <= 1.5), None)
+        if cluster is None:
+            clusters.append([c])
+        elif all(k['source']['path'] != c['source']['path'] for k in cluster):
+            cluster.append(c)
+    clusters.sort(key=lambda k: sum(c['score'] * min(c['overlap'], 30) for c in k), reverse=True)
+    tested = [(k[0]['offset'], 2.0) for k in clusters[:12]]
+    # Another day's clock is tested on top of these, more widely: clocks drift.
+    for value in extra:
+        if all(abs(value - o) > 5 for o, _ in tested):
+            tested.extend([(value, 2.0), (value, PRIOR_DRIFT_SECONDS)])
+    return tested
+
+
 def sync_audio(rows, ffmpeg):
     """Place other cameras by matching their audio to the reference camera, not by file clocks.
 
@@ -1153,8 +1307,8 @@ def sync_audio(rows, ffmpeg):
             coarse_cache[row['path']] = [(samples[i] + samples[i + 1]) / 2
                                          for i in range(0, len(samples) - 1, 2)]
         return coarse_cache[row['path']]
+    days = shoot_days(rows)
     candidates_by_day = defaultdict(list)
-    candidates_by_app = defaultdict(list)
     for reference in reference_rows:
         for source in other:
             if (not source['audio'] or source['duration'] < 4
@@ -1172,58 +1326,108 @@ def sync_audio(rows, ffmpeg):
             score, lag, overlap = match
             offset = reference['timestamp'] - source['timestamp'] - lag
             if abs(offset) <= MAX_CLOCK_ERROR_SECONDS:
-                day = datetime.fromtimestamp(source['timestamp'], timezone.utc).date()
-                candidate = {'source': source, 'reference': reference, 'offset': offset,
-                             'score': score, 'lag': lag, 'overlap': overlap}
-                candidates_by_day[(source['camera'], day)].append(candidate)
-                candidates_by_app[(source['camera'], source.get('capture_app', ''), day)].append(candidate)
+                candidates_by_day[(source['camera'], days[source['path']])].append(
+                    {'source': source, 'reference': reference, 'offset': offset,
+                     'score': score, 'lag': lag, 'overlap': overlap})
+    # A wide search can lock onto repeated noise (sanding, sawing) minutes away,
+    # and two such chance matches once agreed on a wrong clock for a whole day
+    # (test footage 19 Nov 2026: 200 s off). Every candidate clock is therefore
+    # tested on all clips of that day; the clock most clips agree on wins.
+    day_sources = defaultdict(list)
+    for source in other:
+        if (source['audio'] and source['duration'] >= 4
+                and source.get('timestamp_source', 'metadata') == 'metadata'):
+            day_sources[(source['camera'], days[source['path']])].append(source)
+    usable_references = [r for r in reference_rows if r.get('timestamp_source', 'metadata') == 'metadata']
+    def anchors_for(key, tested, prior):
+        sources = day_sources.get(key, [])
+        others = []
+        votes = day_votes(sources, usable_references, tested, sound, others)
+        # A clip without a clear vote keeps its best wide-search match as evidence.
+        for candidate in sorted(candidates_by_day.get(key, []), key=lambda c: c['score'], reverse=True):
+            votes.setdefault(candidate['source']['path'], candidate)
+        chosen = {None: consensus_anchor(list(votes.values()), prior, ffmpeg)}
+        apps = sorted({s.get('capture_app', '') for s in sources})
+        if len(apps) > 1:   # one phone, two recording apps: each app may keep its own clock
+            for app in apps:
+                subset = [v for v in votes.values() if v['source'].get('capture_app', '') == app]
+                chosen[app] = consensus_anchor(subset, prior, ffmpeg)
+        # A single take is checked on every wide-search candidate, not only its best vote.
+        # Most likely first: the clips' best fits, then their other fits, then the wide search.
+        def ranked(fits):
+            return sorted(fits, key=lambda c: c['score'] * min(c['overlap'], 30), reverse=True)
+        singles = (ranked(votes.values())[:6] + ranked(others)[:3]
+                   + ranked(c for c in candidates_by_day.get(key, []) if all(c is not v for v in votes.values()))[:6])
+        return chosen, singles
+    keys = set(candidates_by_day) | set(day_sources)
+    results = {key: anchors_for(key, candidate_offsets(candidates_by_day.get(key, [])), ())
+               for key in keys if candidates_by_day.get(key)}
+    def proven_elsewhere(key):
+        return [result[0][None]['offset'] for other_key, result in results.items()
+                if other_key[0] == key[0] and other_key != key and result[0][None]
+                and not result[0][None]['ambiguous']]
+    # Second pass: a day without a clear answer is also tested at the clock
+    # that other days of the same camera proved (clocks drift seconds, not minutes).
+    for key in sorted(keys, key=lambda k: (k[0], str(k[1]))):
+        current = results.get(key)
+        if current and current[0][None] and not current[0][None]['ambiguous']:
+            continue
+        prior = proven_elsewhere(key)
+        if not prior or not any(overlaps_reference(s, usable_references, p, PRIOR_DRIFT_SECONDS)
+                                for s in day_sources.get(key, []) for p in prior):
+            continue
+        results[key] = anchors_for(key, candidate_offsets(candidates_by_day.get(key, []), prior), prior)
     anchors = {}
     app_anchors = {}
-    for key, candidates in candidates_by_day.items():
-        anchor = dominant_offset(candidates)
-        if anchor:
-            anchors[key] = anchor
-            evidence.append({'camera': key[0], 'day': str(key[1]),
-                             'offset_seconds': round(anchor['offset'], 2),
-                             'matches': [(c['source']['name'], c['reference']['name'], round(c['score'], 3))
-                                         for c in anchor['matches']]})
-    for key, candidates in candidates_by_app.items():
-        anchor = dominant_offset(candidates)
-        if anchor:
-            app_anchors[key] = anchor
-            evidence.append({'camera': key[0], 'capture_app': key[1],
-                             'day': str(key[2]), 'offset_seconds': round(anchor['offset'], 2),
-                             'matches': [(c['source']['name'], c['reference']['name'], round(c['score'], 3))
-                                         for c in anchor['matches']]})
-    for key, candidates in candidates_by_day.items():
-        if key in anchors:
-            continue
-        anchor = confirmed_single_anchor(candidates, ffmpeg)
-        if anchor:
-            anchors[key] = anchor
-            match = anchor['matches'][0]
-            evidence.append({'camera': key[0], 'day': str(key[1]), 'offset_seconds': round(anchor['offset'], 2),
-                             'confirmed_by': anchor['confirmed_by'] + ', single match',
-                             'matches': [(match['source']['name'], match['reference']['name'], round(match['score'], 3))]})
-            warnings.append('Clock of %s set from one sound match (%s with %s), confirmed on the %s. '
-                            'Check the sync by eye once.' % (key[0], match['source']['name'], match['reference']['name'],
-                                                             anchor['confirmed_by']))
+    for key in sorted(results, key=lambda k: (k[0], str(k[1]))):
+        chosen, votes = results[key]
+        for app, anchor in chosen.items():
+            # An app-level tie must not overrule the clock of the whole day.
+            if not anchor or (app is not None and anchor['ambiguous']):
+                continue
+            entry = {'camera': key[0], 'day': str(key[1]), 'offset_seconds': round(anchor['offset'], 2),
+                     'matches': [(c['source']['name'], c['reference']['name'], round(c['score'], 3))
+                                 for c in anchor['matches']]}
+            if app is None:
+                anchors[key] = anchor
+            else:
+                app_anchors[(key[0], app, key[1])] = anchor
+                entry['capture_app'] = app
+            if anchor.get('runner_up') is not None:
+                entry['runner_up_offset_seconds'] = round(anchor['runner_up'], 2)
+            evidence.append(entry)
+        anchor = chosen[None]
+        if anchor and anchor['ambiguous']:
+            warnings.append('Two clock offsets for %s on %s fit the sound almost equally well (%.1f s and %.1f s); '
+                            'the stronger one is used. Check the sync by eye.'
+                            % (key[0], key[1], anchor['offset'], anchor['runner_up']))
+        if anchor is None:
+            single = confirmed_single_anchor(votes, ffmpeg, ordered=True)
+            if single:
+                anchors[key] = single
+                match = single['matches'][0]
+                evidence.append({'camera': key[0], 'day': str(key[1]), 'offset_seconds': round(single['offset'], 2),
+                                 'confirmed_by': single['confirmed_by'] + ', single match',
+                                 'matches': [(match['source']['name'], match['reference']['name'], round(match['score'], 3))]})
+                warnings.append('Clock of %s set from one sound match (%s with %s), confirmed on the %s. '
+                                'Check the sync by eye once.' % (key[0], match['source']['name'], match['reference']['name'],
+                                                                 single['confirmed_by']))
     for camera in {r['camera'] for r in other if r['audio']}:
         if not any(key[0] == camera for key in anchors):
             warnings.append('No reliable sound match between %s and %s; recording times used instead.'
                             % (reference_camera, camera))
     proposals = []
+    unanchored = defaultdict(list)
+    shared_clock = set()
     for source in other:
-        day = datetime.fromtimestamp(source['timestamp'], timezone.utc).date()
+        day = days[source['path']]
         app_key = (source['camera'], source.get('capture_app', ''), day)
         anchor = app_anchors.get(app_key) or anchors.get((source['camera'], day))
         if not anchor:
-            warnings.append('No sound anchor for %s; recording time used for %s.' %
-                            (source['camera'], source['name']))
+            unanchored[(source['camera'], day)].append(source)
             continue
         if app_key not in app_anchors and source.get('capture_app'):
-            warnings.append('No separate sound anchor for %s; shared camera clock used.' %
-                            source['capture_app'])
+            shared_clock.add((source['camera'], source['capture_app'], day))
         source['clock_offset'] = anchor['offset']
         source['sort_time'] = source['timestamp'] + anchor['offset']
         source['sync_method'] = 'audio clock anchor'
@@ -1243,6 +1447,23 @@ def sync_audio(rows, ffmpeg):
             # A raw waveform can still match when microphone gain or
             # compression prevents a reliable loudness-envelope match.
             proposals.append((0.0, 0.0, source, ref, source['sort_time']))
+    # Two recording apps on one phone may keep different clocks; one app alone needs no note.
+    apps_per_day = defaultdict(set)
+    for source in other:
+        apps_per_day[(source['camera'], days[source['path']])].add(source.get('capture_app', ''))
+    for app in sorted({app for camera, app, day in shared_clock if len(apps_per_day[(camera, day)]) > 1}):
+        warnings.append('No separate sound anchor for %s; shared camera clock used.' % app)
+    reference_days = {days[r['path']] for r in reference_rows}
+    elsewhere = defaultdict(int)
+    for (camera, day), clips in sorted(unanchored.items(), key=lambda x: (x[0][0], str(x[0][1]))):
+        if day in reference_days:
+            warnings.append('No sound match for %d clip(s) from %s on %s; their recording times are used. '
+                            'Check the sync by eye.' % (len(clips), camera, day))
+        else:
+            elsewhere[camera] += len(clips)
+    for camera, count in sorted(elsewhere.items()):
+        warnings.append('%d clip(s) from %s were recorded on days without %s; they keep their recording time.'
+                        % (count, camera, reference_camera))
     # Start from the proven common offset. Accept the best clip-level positions
     # first, only when they fit between adjacent clips of that same camera.
     by_camera = defaultdict(list)
@@ -1280,6 +1501,8 @@ def sync_audio(rows, ffmpeg):
         source['clock_offset'] = position - source['timestamp']
         source['sync_method'] = ('spectral match' if spectral else
                                  ('audio match' if score else 'waveform match'))
+        # Frame-accurate against this one reference clip (see refine_reference_clips).
+        source['sync_parent'] = ref['path'] if (fine or spectral) else None
         evidence.append({'source': source['name'], 'reference': ref['name'],
                          'offset_seconds': round(source['clock_offset'], 2),
                          'score': round(score, 3), 'overlap_seconds': round(overlap, 1),
@@ -1292,6 +1515,122 @@ def sync_audio(rows, ffmpeg):
             warnings.append('%d clip(s) from %s use the proven clock correction without a direct sound match.' %
                             (unmatched, camera))
     return evidence, warnings, reference_camera
+
+
+def refine_reference_clips(rows, recorders, ffmpeg, warnings, evidence):
+    """Line up the reference camera's own clips with each other, to the frame.
+
+    The reference camera keeps its own clock, but that clock may store whole
+    seconds only (a Sony with Rec Run timecode gets its place from CreationDate).
+    Clips synced to one reference clip are then exact against that clip, yet up to
+    a second off against the next one. A clip or recorder that was matched to the
+    frame against one reference clip and also runs over another reference clip
+    measures how far that other one is off. Test footage 19 Nov 2026: one Sony
+    clip sat 0.54 s (13 frames) beside an iPhone clip that ran over two Sony clips.
+    """
+    references = [r for r in rows if r.get('reference_audio') and r['audio']
+                  and r.get('timestamp_source', 'metadata') == 'metadata']
+    if len(references) < 2:
+        return
+    nodes = {r['path']: r for r in rows + recorders}
+    reference_paths = {r['path'] for r in references}
+    def root(row):
+        seen = set()
+        while row['path'] not in reference_paths:
+            parent = row.get('sync_parent')
+            if not parent or parent in seen or parent not in nodes:
+                return None
+            seen.add(parent)
+            row = nodes[parent]
+        return row['path']
+    trees = defaultdict(list)
+    for row in rows + recorders:
+        if row['path'] not in reference_paths and row.get('sync_parent'):
+            top = root(row)
+            if top:
+                trees[top].append(row)
+    links = defaultdict(list)
+    for top, members in trees.items():
+        for member in members:
+            for ref in references:
+                if ref['path'] == top:
+                    continue
+                shared = (min(member['sort_time'] + member['duration'], ref['sort_time'] + ref['duration'])
+                          - max(member['sort_time'], ref['sort_time']))
+                if shared < 3:
+                    continue
+                placed = dict(ref, timestamp=ref['sort_time'])
+                try:
+                    fine = precise_audio_position(member, placed, member['sort_time'], ffmpeg)
+                    spectral = None if fine else spectral_audio_position(member, placed, member['sort_time'], ffmpeg)
+                except RECOVERABLE as error:
+                    warnings.append('Fine audio match unavailable for %s: %s' % (member['path'], error))
+                    continue
+                found = fine or spectral
+                # A whole-second clock is never more than a second off.
+                if not found or abs(member['sort_time'] - found[1]) > 1.2:
+                    continue
+                link = {'quality': (bool(fine), found[0]), 'shift': member['sort_time'] - found[1],
+                        'via': member['name'], 'method': 'waveform' if fine else 'spectral'}
+                links[top].append(dict(link, to=ref['path']))
+                links[ref['path']].append(dict(link, to=top, shift=-link['shift']))
+    if not links:
+        return
+    shifts, conflicts, origin = {}, set(), {}
+    by_path = {r['path']: r for r in references}
+    order = sorted(links, key=lambda p: (len(trees.get(p, [])), by_path[p]['duration']), reverse=True)
+    for start in order:
+        if start in shifts:
+            continue
+        # Best links first, also over several steps: waveform before spectral, then score.
+        shifts[start], queue, tie = 0.0, [], 0
+        for link in links[start]:
+            tie += 1
+            heapq.heappush(queue, (-int(link['quality'][0]), -link['quality'][1], tie, start, link))
+        while queue:
+            *_, current, link = heapq.heappop(queue)
+            expected = shifts[current] + link['shift']
+            if link['to'] in shifts:
+                pair = tuple(sorted((current, link['to'])))
+                if abs(shifts[link['to']] - expected) > .08 and pair not in conflicts:
+                    conflicts.add(pair)
+                    warnings.append('Sound places %s and %s differently by %.2f s; check them by eye.'
+                                    % (by_path[pair[0]]['name'], by_path[pair[1]]['name'],
+                                       abs(shifts[link['to']] - expected)))
+                continue
+            shifts[link['to']], origin[link['to']] = expected, link
+            for following in links[link['to']]:
+                tie += 1
+                heapq.heappush(queue, (-int(following['quality'][0]), -following['quality'][1], tie,
+                                       link['to'], following))
+    moved = {p: s for p, s in shifts.items() if abs(s) >= .01}
+    # The same camera cannot record two clips at once (silent clips of it count too).
+    camera_clips = [r for r in rows if r.get('reference_audio')]
+    while True:
+        ordered = sorted(camera_clips, key=lambda r: r['sort_time'] + moved.get(r['path'], 0.0))
+        clash = None
+        for a, b in zip(ordered, ordered[1:], strict=False):
+            if (a['sort_time'] + moved.get(a['path'], 0.0) + a['duration']
+                    > b['sort_time'] + moved.get(b['path'], 0.0) + .04):
+                clash = next((r for r in (b, a) if r['path'] in moved), None)
+                if clash:
+                    break
+        if not clash:
+            break
+        warnings.append('Fine position of %s not used: it would overlap another clip of the same camera.'
+                        % clash['name'])
+        moved.pop(clash['path'])
+    for path, shift in moved.items():
+        link = origin.get(path)
+        evidence.append({'reference_clip': by_path[path]['name'], 'moved_seconds': round(shift, 3),
+                         'measured_via': link['via'] if link else None,
+                         'confirmed_by': link['method'] if link else None,
+                         'score': round(link['quality'][1], 3) if link else None})
+        for row in [by_path[path]] + trees.get(path, []):
+            row['sort_time'] += shift
+            row['clock_offset'] = row.get('clock_offset', 0.0) + shift
+            if row.get('recorder'):
+                row['timestamp'] += shift
 
 
 def drop_duplicate_files(recorders, warnings):
@@ -1333,7 +1672,7 @@ def place_recorders(recorders, rows, ffmpeg, warnings, excluded):
         if recorder['duration'] > limit:
             warnings.append('Only the first %d hours were searched: %s' % (RECORDER_MAX_HOURS, recorder['path']))
         target = {'path': recorder['path'], 'duration': recorder['duration'], 'timestamp': 0.0}
-        position, tries = None, 0
+        position, parent, tries = None, None, 0
         try:
             heard = coarse(envelope(recorder['path'], ffmpeg, limit))
             for clip in clips:
@@ -1346,7 +1685,7 @@ def place_recorders(recorders, rows, ffmpeg, warnings, excluded):
                 tries += 1
                 fine = precise_audio_position(clip, target, -match[1], ffmpeg)
                 if fine:
-                    position = clip['sort_time'] - fine[1]
+                    position, parent = clip['sort_time'] - fine[1], clip['path']
                     break
                 if tries >= 12:
                     break
@@ -1357,7 +1696,7 @@ def place_recorders(recorders, rows, ffmpeg, warnings, excluded):
             excluded.append({'file': recorder['path'], 'reason': 'No matching sound found in the video clips; not placed.'})
             continue
         recorder.update(sort_time=position, timestamp=position, sync_method='recorder match', reference_audio=False,
-                        clock_offset=0.0)
+                        clock_offset=0.0, sync_parent=parent)
         matched.append(recorder)
     # Two recordings at once are usually two speakers, so neither is muted.
     for i, a in enumerate(matched):
@@ -1686,11 +2025,20 @@ def source_from_resolve(resolve):
     return project, {}, paths
 
 
+def proxy_note(rows, proxies):
+    used = {str(Path(p).resolve()) for p in proxies} & {r['path'] for r in rows}
+    if not used:
+        return []
+    return ['%d proxy file(s) used because the original is missing (first: %s). '
+            'Put the originals back in the folder for full quality.' % (len(used), min(used))]
+
+
 class MediaPaths(list):
-    def __init__(self, values, warnings=(), ignored=0):
+    def __init__(self, values, warnings=(), ignored=0, proxies=()):
         super().__init__(values)
         self.warnings = list(warnings)
         self.ignored = ignored
+        self.proxies = list(proxies)   # proxy files used because their original is missing
 
 
 def select_media_paths(directory):
@@ -1725,7 +2073,7 @@ def select_media_paths(directory):
                 return ancestor.parent
         return None
     originals = {(p.parent, p.name.casefold()) for p in paths if owner(p) is None}
-    selected, proxy_only = [], defaultdict(list)
+    selected, proxy_only, stand_ins = [], defaultdict(list), []
     for path in paths:
         proxy_owner = owner(path)
         if proxy_owner is None:
@@ -1739,8 +2087,9 @@ def select_media_paths(directory):
             if not duplicate:
                 proxy_only[path.name.casefold()].append(path)
                 selected.append(path)
+                stand_ins.append(path)
     say('Proxy copies skipped:', len(paths) - len(selected), '; non-video/helper files ignored:', ignored)
-    return MediaPaths(selected, warnings, ignored)
+    return MediaPaths(selected, warnings, ignored, stand_ins)
 
 
 def configured_profile(camera):
@@ -2074,7 +2423,7 @@ def build_multicam(resolve, project, pm, pool, imported, rows, recorders, fps, r
             continue
         if len(cameras) == 1:
             warnings.append('Shoot %d has only one camera (%s); its multicam has a single angle.' % (number_, cameras[0]))
-        name = 'Multicam %d · %s' % (number_, datetime.fromtimestamp(session['start']).strftime('%Y-%m-%d %H:%M'))
+        name = 'Multicam %d · %s' % (number_, local_time(session['start']).strftime('%Y-%m-%d %H:%M'))
         options = {'name': name, 'angleSyncMode': resolve.MULTICAM_ANGLE_SYNC_TIMECODE,
                    'detectSameCameraClipsMode': resolve.MULTICAM_DETECT_BY_CAMERA_NUMBER,
                    'angleNameMode': resolve.MULTICAM_ANGLE_NAME_ANGLE,
@@ -2223,6 +2572,7 @@ def build_inner(resolve, project, imported, disk_paths, ffprobe, ffmpeg, report)
     rows, excluded = inspect_sources(paths, ffprobe)
     report['excluded'] = excluded
     warnings = report['warnings']
+    warnings.extend(proxy_note(rows, getattr(disk_paths, 'proxies', [])))
     recorders = drop_duplicate_files([r for r in rows if r.get('recorder')], warnings)
     rows = [r for r in rows if not r.get('recorder')]
     need(rows, 'No usable video in this format found; see the report.')
@@ -2284,7 +2634,9 @@ def build_inner(resolve, project, imported, disk_paths, ffprobe, ffmpeg, report)
     say('Media imported:', len(rows), '; checking audio sync.')
     evidence, sync_warnings, reference_camera = sync_audio(rows, ffmpeg)
     warnings.extend(sync_warnings)
-    recorders = import_recorders(pool, place_recorders(recorders, rows, ffmpeg, warnings, excluded), imported, excluded, ffmpeg, warnings)
+    recorders = place_recorders(recorders, rows, ffmpeg, warnings, excluded)
+    refine_reference_clips(rows, recorders, ffmpeg, warnings, evidence)
+    recorders = import_recorders(pool, recorders, imported, excluded, ffmpeg, warnings)
     say('Audio synced; comparing sound quality.')
     report['audio_summary'], report['audio_quality'] = rank_audio(rows + recorders, ffmpeg, reference_camera, warnings)
     rows.sort(key=lambda r: (r['sort_time'], r['path']))

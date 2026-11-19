@@ -1,10 +1,18 @@
 # Changelog
 
-## 1.0.1 — 2026-11-18
+## 1.0.1 — 2026-11-18, replaced on 2026-11-19
 
-Documentation only; the scripts work exactly as in 1.0.0.
+Sync fixes in the four timeline scripts, found on a real shoot over several days (Sony A7 IV with Rec Run timecode, iPhone 16 Pro with the Blackmagic Camera app, 129 clips, a lot of sanding and sawing noise). The first 1.0.1 of 18 November changed only the documentation; this release replaces it.
 
+- **A whole day could end up minutes out of sync.** Repeated noise made two clips match the reference camera at the same wrong moment, and that wrong clock correction was then used for every clip of that day (200 seconds off). Each candidate correction is now tested on all clips of that day, and the one most clips agree on wins. When two corrections fit almost equally well, the waveform or the correction of another day decides, and the report says so.
+- **Clips of the reference camera could sit up to a second apart from each other.** A Sony with Rec Run timecode stores its recording time in whole seconds. When a clip of another camera (or a recorder) runs over two of its clips, those clips are now lined up with each other by sound, to the frame. On the test shoot one Sony clip moved 0.51 seconds (13 frames).
+- **More days get synced.** A day that the wide search couldn't settle is tested again at the clock that other days of the same camera proved; it still needs the same proof.
+- **A shoot past midnight** stays one day for the sync (local time), instead of being split at midnight UTC.
+- **An empty camera clock** (a date in 1970) no longer counts as a recording time, and odd dates can no longer stop the script on Windows.
+- **Shorter report:** clips without a sound match are counted per day instead of listed one by one; clips from days without the reference camera get one line. A proxy file that stands in for a missing original is now named in the report.
 - **Requirements now say DaVinci Resolve Studio 21.1 or newer.** From Resolve 21.1 on, Blackmagic runs Python scripts in Studio only. In the free edition the scripts don't appear under Workspace › Scripts and the Console has no Py3 tab (checked on the free edition for Windows). 1.0.0 still listed the free version as "supported in the code, not tested yet".
+
+**Tested:** the multi-day shoot above (24 July unchanged and within a frame; 28 July from 200 s off to within a frame; 1 August now synced; every clearly matching camera pair checked independently: all within one frame); Cutting Clockwork's own test shoot (Sony A7 IV, Nikon Z fc, Røde Wireless PRO): no clip moved; a real shoot of 257 clips (Sony A7 IV + iPhone 16 Pro): no clip moved. 149 automated tests; code review by Antigravity, all points handled (see QUALITY.md).
 
 ## 1.0.0 — 2026-11-13
 
