@@ -1,5 +1,7 @@
 # DaVinci Auto-Setup
 
+**Video:** [watch the one-click demo on YouTube](https://youtu.be/0-eQRxd0rgQ)
+
 DaVinci Resolve scripts for the start and the end of an edit. Four of them turn one folder of footage into a ready-to-edit timeline:
 
 | Script | Timeline | Uses |
